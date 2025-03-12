@@ -74,13 +74,11 @@ module.exports = async (req, res) => {
     });
 
     if (!response.ok) {
-      return res.status(response.status)
-                .json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
+      return res.status(response.status).json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
     }
 
     const html = await response.text();
     const $ = cheerio.load(html);
-    const bodyContent = $('body').html();
     const bodyText = $('body').text();
 
     // Collect images with absolute URLs.
@@ -115,8 +113,7 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       success: true,
       totalImages: images.length,
-      errorGroups,
-      body: bodyContent
+      errorGroups
     });
   } catch (error) {
     console.error('Error in scraping:', error);
