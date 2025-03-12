@@ -51,8 +51,8 @@ function validateAltText(image, bodyText, $) {
         const elText = $(el).text().trim();
         if (elText.toLowerCase().includes(alt.toLowerCase())) {
           const diff = elText.length - alt.length;
-          // Only accept candidates that don't have a lot more text than the alt text.
-          if (diff >= 0 && diff < bestDiff && diff < 30) { // threshold can be adjusted
+          // Only accept candidates with a small extra text length (adjust threshold as needed)
+          if (diff >= 0 && diff < bestDiff && diff < 30) {
             bestDiff = diff;
             matchingElement = $.html(el);
           }
@@ -158,8 +158,9 @@ module.exports = async (req, res) => {
     // Calculate the total number of errors across all images.
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
 
-    // Return only the total number of errors and the error groups.
+    // Return total images, total errors and the error groups.
     return res.status(200).json({
+      totalImages: images.length,
       totalErrors,
       errorGroups
     });
