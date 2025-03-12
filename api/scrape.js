@@ -43,8 +43,8 @@ function validateAltText(image, bodyText, $) {
   // Rule 5: Matching Nearby Content – return the entire matching element's HTML.
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
     let matchingElement = null;
-    // Search through common selectors.
-    const selectors = ['h1', 'h2', 'h3', 'p', 'span', 'div', 'li'];
+    // Search through common selectors (excluding 'div' to avoid generic parent elements).
+    const selectors = ['h1', 'h2', 'h3', 'p', 'span', 'li'];
     for (let sel of selectors) {
       $(sel).each((i, el) => {
         const elText = $(el).text();
