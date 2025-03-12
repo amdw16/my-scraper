@@ -3,36 +3,45 @@ const cheerio = require('cheerio');
 const fetch = require('node-fetch'); // Using node-fetch@2 in CommonJS
 
 // Helper function: validate alt text and return an array of error objects.
-// For the "Matching Nearby Content" error, include a snippet.
 function validateAltText(image, bodyText) {
   const errors = [];
   const alt = image.alt.trim();
 
   // Rule 1: Missing Alt Text
   if (!alt) {
-    errors.push({ type: "Missing Alt Text", message: "This image is missing an alt text description needed for accessibility." });
+    errors.push({
+      type: "Missing Alt Text",
+      message: "This image is missing an alt text description needed for accessibility."
+    });
   }
 
   // Rule 2: Alt Text as an Image File Name
   const srcFileName = image.src.split('/').pop().split('.')[0];
   if (alt && alt.toLowerCase() === srcFileName.toLowerCase()) {
-    errors.push({ type: "Alt Text as an Image File Name", message: "The alt text is simply the file name, which doesn’t describe the image." });
+    errors.push({
+      type: "Alt Text as an Image File Name",
+      message: "The alt text is simply the file name, which doesn’t describe the image."
+    });
   }
 
   // Rule 3: Short Alt Text (less than 10 characters)
   if (alt && alt.length < 10) {
-    errors.push({ type: "Short Alt Text", message: "The alt text is too short to provide a meaningful description." });
+    errors.push({
+      type: "Short Alt Text",
+      message: "The alt text is too short to provide a meaningful description."
+    });
   }
 
   // Rule 4: Long Alt Text (more than 100 characters)
   if (alt && alt.length > 100) {
-    errors.push({ type: "Long Alt Text", message: "The alt text is excessively long, which can confuse users and dilute clarity." });
+    errors.push({
+      type: "Long Alt Text",
+      message: "The alt text is excessively long, which can confuse users and dilute clarity."
+    });
   }
 
   // Rule 5: Matching Nearby Content
-  // If the alt text appears in the page's body text, we consider that an error.
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
-    // Try to extract a snippet: 50 characters before and after the alt text occurrence
     const altLower = alt.toLowerCase();
     const bodyLower = bodyText.toLowerCase();
     const idx = bodyLower.indexOf(altLower);
@@ -40,19 +49,27 @@ function validateAltText(image, bodyText) {
     if (idx !== -1) {
       snippet = bodyText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
     }
-    errors.push({ type: "Matching Nearby Content", message: "The alt text duplicates nearby text, offering no additional image context.", snippet });
+    errors.push({
+      type: "Matching Nearby Content",
+      message: "The alt text duplicates nearby text, offering no additional image context.",
+      snippet
+    });
   }
 
-  // Rule 6: Random Characters
-  // A simple heuristic: if the alt text is 10+ characters with no spaces, treat it as random.
+  // Rule 6: Random Characters (10+ characters with no spaces)
   if (/^[a-zA-Z0-9]{10,}$/.test(alt)) {
-    errors.push({ type: "Random Characters", message: "The alt text is a string of random characters that fails to describe the image." });
+    errors.push({
+      type: "Random Characters",
+      message: "The alt text is a string of random characters that fails to describe the image."
+    });
   }
 
-  // Rule 7: Keyword String
-  // If the alt text contains commas and looks like a list.
+  // Rule 7: Keyword String (contains commas, looks like a list)
   if (alt.split(',').length > 1) {
-    errors.push({ type: "Keyword String", message: "The alt text is just a list of keywords instead of a coherent description." });
+    errors.push({
+      type: "Keyword String",
+      message: "The alt text is just a list of keywords instead of a coherent description."
+    });
   }
 
   return errors;
@@ -92,8 +109,7 @@ module.exports = async (req, res) => {
     // Load HTML into Cheerio.
     const $ = cheerio.load(html);
 
-    // Extract the inner HTML of the <body> and also its text content.
-    const bodyContent = $('body').html();
+    // Extract the text content of the <body>.
     const bodyText = $('body').text();
 
     // Collect images.
@@ -104,20 +120,15 @@ module.exports = async (req, res) => {
       images.push({ src, alt });
     });
 
-    // Now, group images by error type.
+    // Group images by error type.
     const errorGroups = {};
-
     images.forEach(image => {
       const imageErrors = validateAltText(image, bodyText);
-      // For each error found, add the image info (and snippet if available) to the corresponding group.
       imageErrors.forEach(err => {
-        // Initialize the group if it doesn't exist.
         if (!errorGroups[err.type]) {
           errorGroups[err.type] = [];
         }
-        // Create an object with image details.
         const imgDetails = { src: image.src, alt: image.alt };
-        // If this error type is "Matching Nearby Content", also include the snippet.
         if (err.type === "Matching Nearby Content" && err.snippet) {
           imgDetails.snippet = err.snippet;
         }
@@ -125,12 +136,11 @@ module.exports = async (req, res) => {
       });
     });
 
-    // Return a JSON response grouping images by error.
+    // Return only the total image count and the error groups.
     return res.status(200).json({
       success: true,
       totalImages: images.length,
-      errorGroups,
-      body: bodyContent // inner HTML of <body>
+      errorGroups
     });
   } catch (error) {
     console.error('Error in scraping:', error);
