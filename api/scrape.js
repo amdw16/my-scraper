@@ -13,12 +13,16 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Missing "url" in request body.' });
     }
 
-    // Note the headers block with a realistic User-Agent:
+    // Add more "browser-like" headers
     const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-                      '(KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36'
-      }
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+          '(KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Upgrade-Insecure-Requests': '1',
+      },
     });
 
     if (!response.ok) {
@@ -38,10 +42,12 @@ module.exports = async (req, res) => {
       });
     });
 
+    // Return images + the entire HTML
     return res.status(200).json({
       success: true,
       count: images.length,
       images,
+      html
     });
   } catch (error) {
     console.error('Error in scraping:', error);
