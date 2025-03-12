@@ -40,21 +40,27 @@ function validateAltText(image, bodyText, $) {
     });
   }
 
-  // Rule 5: Matching Nearby Content – return the entire matching element's HTML.
+  // Rule 5: Matching Nearby Content – return the entire matching element's HTML if it's a concise text element.
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
     let matchingElement = null;
-    // Search through common selectors (excluding 'div' to avoid generic parent elements).
+    let bestDiff = Infinity;
+    // Only check these selectors to avoid overly generic containers.
     const selectors = ['h1', 'h2', 'h3', 'p', 'span', 'li'];
     for (let sel of selectors) {
       $(sel).each((i, el) => {
-        const elText = $(el).text();
-        if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
-          matchingElement = $.html(el);
+        const elText = $(el).text().trim();
+        if (elText.toLowerCase().includes(alt.toLowerCase())) {
+          const diff = elText.length - alt.length;
+          // Only accept candidates that don't have a lot more text than the alt text.
+          if (diff >= 0 && diff < bestDiff && diff < 30) { // threshold can be adjusted
+            bestDiff = diff;
+            matchingElement = $.html(el);
+          }
         }
       });
       if (matchingElement) break;
     }
-    // Fallback: If no matching element is found, use a snippet.
+    // Fallback: If no candidate is found, use a snippet.
     if (!matchingElement) {
       const altLower = alt.toLowerCase();
       const bodyLower = bodyText.toLowerCase();
