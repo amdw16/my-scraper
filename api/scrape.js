@@ -40,23 +40,22 @@ function validateAltText(image, bodyText, $) {
     });
   }
 
-  // Rule 5: Matching Nearby Content – output the entire matching element’s HTML if found.
+  // Rule 5: Matching Nearby Content – return the entire matching element's HTML.
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
     let matchingElement = null;
-    // Search common tag selectors for an element containing the alt text.
+    // Search through common selectors.
     const selectors = ['h1', 'h2', 'h3', 'p', 'span', 'div', 'li'];
     for (let sel of selectors) {
       $(sel).each((i, el) => {
         const elText = $(el).text();
         if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
-          // Use $.html(el) to get the full outer HTML of the element.
           matchingElement = $.html(el);
         }
       });
       if (matchingElement) break;
     }
+    // Fallback: If no matching element is found, use a snippet.
     if (!matchingElement) {
-      // Fallback: if no matching element is found, extract a snippet from the body text.
       const altLower = alt.toLowerCase();
       const bodyLower = bodyText.toLowerCase();
       const idx = bodyLower.indexOf(altLower);
@@ -93,19 +92,16 @@ function validateAltText(image, bodyText, $) {
 }
 
 module.exports = async (req, res) => {
-  // Only allow POST requests.
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
   try {
-    // Get URL from request body.
     const { url } = req.body || {};
     if (!url) {
       return res.status(400).json({ error: 'Missing "url" in request body.' });
     }
 
-    // Fetch the target page with realistic headers.
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
@@ -120,14 +116,8 @@ module.exports = async (req, res) => {
                 .json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
     }
 
-    // Get the full HTML.
     const html = await response.text();
-
-    // Load HTML into Cheerio.
     const $ = cheerio.load(html);
-
-    // Extract the inner HTML of the <body> and its text content.
-    const bodyContent = $('body').html();
     const bodyText = $('body').text();
 
     // Collect images with absolute URLs.
@@ -159,13 +149,13 @@ module.exports = async (req, res) => {
       });
     });
 
-    // Return a JSON response.
+    // Calculate the total number of errors across all images.
+    const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
+
+    // Return only the total number of errors and the error groups.
     return res.status(200).json({
-      success: true,
-      totalImages: images.length,
-      errorGroups,
-      // Optionally, you can remove bodyContent from the response if not needed.
-      // body: bodyContent
+      totalErrors,
+      errorGroups
     });
   } catch (error) {
     console.error('Error in scraping:', error);
