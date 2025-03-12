@@ -40,27 +40,22 @@ function validateAltText(image, bodyText, $) {
     });
   }
 
-  // Rule 5: Matching Nearby Content – return the entire matching element's HTML if it's a concise text element.
+  // Rule 5: Matching Nearby Content – return only the text content from the matching element.
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
     let matchingElement = null;
-    let bestDiff = Infinity;
-    // Only check these selectors to avoid overly generic containers.
-    const selectors = ['h1', 'h2', 'h3', 'p', 'span', 'li'];
+    // Limit selectors to only 'h1', 'h2', 'h3', 'p', and 'span'
+    const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
     for (let sel of selectors) {
       $(sel).each((i, el) => {
         const elText = $(el).text().trim();
-        if (elText.toLowerCase().includes(alt.toLowerCase())) {
-          const diff = elText.length - alt.length;
-          // Only accept candidates with a small extra text length (adjust threshold as needed)
-          if (diff >= 0 && diff < bestDiff && diff < 30) {
-            bestDiff = diff;
-            matchingElement = $.html(el);
-          }
+        if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
+          // Return only the text content instead of the entire HTML.
+          matchingElement = elText;
         }
       });
       if (matchingElement) break;
     }
-    // Fallback: If no candidate is found, use a snippet.
+    // Fallback: If no matching element is found, use a snippet.
     if (!matchingElement) {
       const altLower = alt.toLowerCase();
       const bodyLower = bodyText.toLowerCase();
@@ -158,7 +153,7 @@ module.exports = async (req, res) => {
     // Calculate the total number of errors across all images.
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
 
-    // Return total images, total errors and the error groups.
+    // Return the total number of images, total errors, and the error groups.
     return res.status(200).json({
       totalImages: images.length,
       totalErrors,
