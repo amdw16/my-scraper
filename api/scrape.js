@@ -17,11 +17,20 @@ function validateAltText(image, bodyText, $) {
 
   // Rule 2: Alt Text as an Image File Name
   const srcFileName = image.src.split('/').pop().split('.')[0];
-  if (alt && alt.toLowerCase() === srcFileName.toLowerCase()) {
+  if (alt) {
+  const altLower = alt.toLowerCase().trim();
+  const fileNameLower = srcFileName.toLowerCase().trim();
+  const imageExtensions = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
+
+  if (
+    altLower === fileNameLower ||
+    imageExtensions.test(altLower)
+     ) {
     errors.push({
       type: "Alt Text as an Image File Name",
-      message: "The alt text is simply the file name, which doesn’t describe the image."
-    });
+      message: "The alt text appears to be just a file name or ends with an image extension, rather than a descriptive phrase."
+      });
+    }
   }
 
   // Rule 3: Short Alt Text (less than 10 characters)
