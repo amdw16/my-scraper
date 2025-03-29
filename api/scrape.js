@@ -1,4 +1,3 @@
-// api/scrape.js
 const cheerio = require('cheerio');
 const fetch = require('node-fetch'); // Using node-fetch@2 in CommonJS
 
@@ -49,6 +48,7 @@ function validateAltText(image, bodyText, $) {
       $(sel).each((i, el) => {
         const elText = $(el).text().trim();
         if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
+          // Return only the text content
           matchingElement = elText;
         }
       });
@@ -92,13 +92,13 @@ function validateAltText(image, bodyText, $) {
 }
 
 module.exports = async (req, res) => {
-  // Set CORS headers to allow requests from any origin
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // Set CORS headers for all responses
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   // Handle preflight OPTIONS request
-  if (req.method === "OPTIONS") {
+  if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
 
@@ -162,10 +162,15 @@ module.exports = async (req, res) => {
     // Calculate the total number of errors across all images.
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
 
-    // Return the total number of images, total errors, and the error groups.
+    // (Optional) Calculate total alerts from "Short Alt Text" and "Long Alt Text" categories.
+    const totalAlerts = (errorGroups["Short Alt Text"] ? errorGroups["Short Alt Text"].length : 0) +
+                         (errorGroups["Long Alt Text"] ? errorGroups["Long Alt Text"].length : 0);
+
+    // Return the total number of images, total errors, total alerts, and the error groups.
     return res.status(200).json({
       totalImages: images.length,
       totalErrors,
+      totalAlerts,
       errorGroups
     });
   } catch (error) {
