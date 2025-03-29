@@ -25,7 +25,7 @@ function validateAltText(image, bodyText, $) {
   }
 
   // Rule 3: Short Alt Text (less than 10 characters)
-  if (alt && alt.length < 10) {
+  if (alt && alt.length < 20) {
     errors.push({
       type: "Short Alt Text",
       message: "The alt text is too short to provide a meaningful description."
@@ -33,7 +33,7 @@ function validateAltText(image, bodyText, $) {
   }
 
   // Rule 4: Long Alt Text (more than 100 characters)
-  if (alt && alt.length > 100) {
+  if (alt && alt.length > 300) {
     errors.push({
       type: "Long Alt Text",
       message: "The alt text is excessively long, which can confuse users and dilute clarity."
