@@ -48,7 +48,6 @@ function validateAltText(image, bodyText, $) {
       $(sel).each((i, el) => {
         const elText = $(el).text().trim();
         if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
-          // Return only the text content
           matchingElement = elText;
         }
       });
@@ -92,7 +91,7 @@ function validateAltText(image, bodyText, $) {
 }
 
 module.exports = async (req, res) => {
-  // Set CORS headers for all responses
+  // Set CORS headers for every response
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -122,8 +121,7 @@ module.exports = async (req, res) => {
     });
 
     if (!response.ok) {
-      return res.status(response.status)
-                .json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
+      return res.status(response.status).json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
     }
 
     const html = await response.text();
@@ -138,7 +136,7 @@ module.exports = async (req, res) => {
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // Leave src unchanged if an error occurs.
+        // If an error occurs, leave src as is.
       }
       images.push({ src, alt });
     });
@@ -162,7 +160,7 @@ module.exports = async (req, res) => {
     // Calculate the total number of errors across all images.
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
 
-    // (Optional) Calculate total alerts from "Short Alt Text" and "Long Alt Text" categories.
+    // Calculate total alerts from "Short Alt Text" and "Long Alt Text"
     const totalAlerts = (errorGroups["Short Alt Text"] ? errorGroups["Short Alt Text"].length : 0) +
                          (errorGroups["Long Alt Text"] ? errorGroups["Long Alt Text"].length : 0);
 
