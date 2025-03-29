@@ -49,7 +49,7 @@ function validateAltText(image, bodyText, $) {
       $(sel).each((i, el) => {
         const elText = $(el).text().trim();
         if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
-          // Return only the text content instead of the full HTML.
+          // Return only the text content
           matchingElement = elText;
         }
       });
@@ -93,7 +93,20 @@ function validateAltText(image, bodyText, $) {
 
 module.exports = async (req, res) => {
   // --- BEGIN CORS HEADERS ---
-  res.setHeader("Access-Control-Allow-Origin", "*");
+  const allowedOrigins = [
+    "https://scribely-v2.webflow.io",
+    "https://scribely.com",
+    "https://scribelytribe.com",
+    "https://www.scribely.com",
+    "https://www.scribelytribe.com"
+  ];
+  const origin = req.headers.origin || "";
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+  } else {
+    // Optionally, you can block requests from other origins or set a default:
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") {
@@ -111,6 +124,7 @@ module.exports = async (req, res) => {
       return res.status(400).json({ error: 'Missing "url" in request body.' });
     }
 
+    // Fetch the target URL with appropriate headers.
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
@@ -129,7 +143,7 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const bodyText = $('body').text();
 
-    // Collect images with absolute URLs.
+    // Collect images (with resolved absolute URLs)
     const images = [];
     $('img').each((i, el) => {
       let src = $(el).attr('src') || '';
@@ -137,7 +151,7 @@ module.exports = async (req, res) => {
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // If error, leave src unchanged.
+        // Leave src unchanged if URL parsing fails.
       }
       images.push({ src, alt });
     });
@@ -158,10 +172,8 @@ module.exports = async (req, res) => {
       });
     });
 
-    // Calculate total errors (for our "errors" count, consider only error categories)
+    // Calculate totals.
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
-
-    // For alerts, assume "Short Alt Text" and "Long Alt Text" are considered alerts.
     const totalAlerts = ((errorGroups["Short Alt Text"] || []).length) + ((errorGroups["Long Alt Text"] || []).length);
 
     return res.status(200).json({
