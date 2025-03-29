@@ -104,7 +104,6 @@ module.exports = async (req, res) => {
   if (allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   } else {
-    // Optionally, you can block requests from other origins or set a default:
     res.setHeader("Access-Control-Allow-Origin", "*");
   }
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -119,9 +118,14 @@ module.exports = async (req, res) => {
   }
 
   try {
-    const { url } = req.body || {};
+    let { url } = req.body || {};
     if (!url) {
       return res.status(400).json({ error: 'Missing "url" in request body.' });
+    }
+
+    // Ensure the URL is absolute; if missing protocol, default to https://
+    if (!/^https?:\/\//i.test(url)) {
+      url = 'https://' + url;
     }
 
     // Fetch the target URL with appropriate headers.
@@ -135,6 +139,7 @@ module.exports = async (req, res) => {
     });
 
     if (!response.ok) {
+      console.error('Failed to fetch URL, status:', response.status);
       return res.status(response.status)
                 .json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
     }
@@ -143,7 +148,7 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const bodyText = $('body').text();
 
-    // Collect images (with resolved absolute URLs)
+    // Collect images with resolved absolute URLs.
     const images = [];
     $('img').each((i, el) => {
       let src = $(el).attr('src') || '';
@@ -151,7 +156,7 @@ module.exports = async (req, res) => {
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // Leave src unchanged if URL parsing fails.
+        // If URL parsing fails, leave src unchanged.
       }
       images.push({ src, alt });
     });
