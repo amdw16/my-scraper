@@ -1,3 +1,4 @@
+// api/scrape.js
 const cheerio = require('cheerio');
 const fetch = require('node-fetch'); // Using node-fetch@2 in CommonJS
 
@@ -42,18 +43,18 @@ function validateAltText(image, bodyText, $) {
   // Rule 5: Matching Nearby Content – return only the text content from the matching element.
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
     let matchingElement = null;
-    // Limit selectors to only 'h1', 'h2', 'h3', 'p', and 'span'
+    // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
     const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
     for (let sel of selectors) {
       $(sel).each((i, el) => {
         const elText = $(el).text().trim();
         if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
+          // Return only the text content instead of the full HTML.
           matchingElement = elText;
         }
       });
       if (matchingElement) break;
     }
-    // Fallback: If no matching element is found, use a snippet.
     if (!matchingElement) {
       const altLower = alt.toLowerCase();
       const bodyLower = bodyText.toLowerCase();
@@ -91,15 +92,14 @@ function validateAltText(image, bodyText, $) {
 }
 
 module.exports = async (req, res) => {
-  // Set CORS headers for every response
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-  // Handle preflight OPTIONS request
-  if (req.method === 'OPTIONS') {
+  // --- BEGIN CORS HEADERS ---
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
+  // --- END CORS HEADERS ---
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
@@ -121,7 +121,8 @@ module.exports = async (req, res) => {
     });
 
     if (!response.ok) {
-      return res.status(response.status).json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
+      return res.status(response.status)
+                .json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
     }
 
     const html = await response.text();
@@ -136,7 +137,7 @@ module.exports = async (req, res) => {
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // If an error occurs, leave src as is.
+        // If error, leave src unchanged.
       }
       images.push({ src, alt });
     });
@@ -157,14 +158,12 @@ module.exports = async (req, res) => {
       });
     });
 
-    // Calculate the total number of errors across all images.
+    // Calculate total errors (for our "errors" count, consider only error categories)
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
 
-    // Calculate total alerts from "Short Alt Text" and "Long Alt Text"
-    const totalAlerts = (errorGroups["Short Alt Text"] ? errorGroups["Short Alt Text"].length : 0) +
-                         (errorGroups["Long Alt Text"] ? errorGroups["Long Alt Text"].length : 0);
+    // For alerts, assume "Short Alt Text" and "Long Alt Text" are considered alerts.
+    const totalAlerts = ((errorGroups["Short Alt Text"] || []).length) + ((errorGroups["Long Alt Text"] || []).length);
 
-    // Return the total number of images, total errors, total alerts, and the error groups.
     return res.status(200).json({
       totalImages: images.length,
       totalErrors,
