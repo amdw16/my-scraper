@@ -11,80 +11,94 @@ function validateAltText(image, bodyText, $) {
   if (!alt) {
     errors.push({ 
       type: "Missing Alt Text", 
-      message: "This image is missing an alt text description needed for accessibility." 
+      message: "This image is missing an alt text description needed for accessibility."
     });
   }
 
   // Rule 2: Alt Text as an Image File Name
   const srcFileName = image.src.split('/').pop().split('.')[0];
   if (alt && alt.toLowerCase() === srcFileName.toLowerCase()) {
-    errors.push({ 
-      type: "Alt Text as an Image File Name", 
-      message: "The alt text is simply the file name, which doesn’t describe the image." 
+    errors.push({
+      type: "Alt Text as an Image File Name",
+      message: "The alt text is simply the file name, which doesn’t describe the image."
     });
   }
 
   // Rule 3: Short Alt Text (less than 10 characters)
   if (alt && alt.length < 10) {
-    errors.push({ 
-      type: "Short Alt Text", 
-      message: "The alt text is too short to provide a meaningful description." 
+    errors.push({
+      type: "Short Alt Text",
+      message: "The alt text is too short to provide a meaningful description."
     });
   }
 
   // Rule 4: Long Alt Text (more than 100 characters)
   if (alt && alt.length > 100) {
-    errors.push({ 
-      type: "Long Alt Text", 
-      message: "The alt text is excessively long, which can confuse users and dilute clarity." 
+    errors.push({
+      type: "Long Alt Text",
+      message: "The alt text is excessively long, which can confuse users and dilute clarity."
     });
   }
 
-  // Rule 5: Matching Nearby Content – return only the text content from the matching element.
+  // Rule 5: Matching Nearby Content
+  // Return only the text content from the matching element, plus the snippet
   if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
     let matchingElement = null;
+    let matchingSnippet = null;
+
     // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
     const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
+
+    outerLoop:
     for (let sel of selectors) {
-      $(sel).each((i, el) => {
-        const elText = $(el).text().trim();
-        if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
-          // Return only the text content
+      const foundEls = $(sel);
+      for (let i = 0; i < foundEls.length; i++) {
+        const foundEl = foundEls[i];
+        const elText = $(foundEl).text().trim();
+
+        if (elText.toLowerCase().includes(alt.toLowerCase())) {
           matchingElement = elText;
+          matchingSnippet = $.html(foundEl).trim();
+          break outerLoop;
         }
-      });
-      if (matchingElement) break;
+      }
     }
+
+    // If not found in a heading/paragraph/span, fallback to searching raw text
     if (!matchingElement) {
       const altLower = alt.toLowerCase();
       const bodyLower = bodyText.toLowerCase();
       const idx = bodyLower.indexOf(altLower);
-      let snippet = "";
       if (idx !== -1) {
-        snippet = bodyText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
+        const snippet = bodyText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
+        matchingElement = snippet;
+        // matchingSnippet might remain null, or store it similarly
       }
-      matchingElement = snippet;
     }
-    errors.push({ 
-      type: "Matching Nearby Content", 
-      message: "The alt text duplicates nearby text, offering no additional image context.", 
-      matchingElement 
-    });
+
+    if (matchingElement) {
+      errors.push({
+        type: "Matching Nearby Content",
+        message: "The alt text duplicates nearby text, offering no additional image context.",
+        matchingElement,      // plain text
+        matchingSnippet       // raw HTML snippet, if found
+      });
+    }
   }
 
   // Rule 6: Random Characters
   if (/^[a-zA-Z0-9]{10,}$/.test(alt)) {
-    errors.push({ 
-      type: "Random Characters", 
-      message: "The alt text is a string of random characters that fails to describe the image." 
+    errors.push({
+      type: "Random Characters",
+      message: "The alt text is a string of random characters that fails to describe the image."
     });
   }
 
   // Rule 7: Keyword String
   if (alt.split(',').length > 1) {
-    errors.push({ 
-      type: "Keyword String", 
-      message: "The alt text is just a list of keywords instead of a coherent description." 
+    errors.push({
+      type: "Keyword String",
+      message: "The alt text is just a list of keywords instead of a coherent description."
     });
   }
 
@@ -128,7 +142,7 @@ module.exports = async (req, res) => {
       url = 'https://' + url;
     }
 
-    // Fetch the target URL with appropriate headers.
+    // Fetch the target URL
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
@@ -148,17 +162,20 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const bodyText = $('body').text();
 
-    // Collect images with resolved absolute URLs.
+    // Collect images with resolved absolute URLs + store entire <img> HTML in snippet
     const images = [];
     $('img').each((i, el) => {
       let src = $(el).attr('src') || '';
       const alt = $(el).attr('alt') || '';
+      const snippet = $.html(el).trim(); // entire <img> HTML
+
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // If URL parsing fails, leave src unchanged.
+        // If URL parsing fails, keep src as-is
       }
-      images.push({ src, alt });
+
+      images.push({ src, alt, snippet });
     });
 
     // Group images by error type.
@@ -169,15 +186,29 @@ module.exports = async (req, res) => {
         if (!errorGroups[err.type]) {
           errorGroups[err.type] = [];
         }
-        const imgDetails = { src: image.src, alt: image.alt };
-        if (err.type === "Matching Nearby Content" && err.matchingElement) {
-          imgDetails.matchingElement = err.matchingElement;
+
+        // Attach snippet, matchingElement, matchingSnippet, etc.
+        const imgDetails = {
+          src: image.src,
+          alt: image.alt,
+          snippet: image.snippet
+        };
+
+        // If "Matching Nearby Content" includes matchingElement or snippet
+        if (err.type === "Matching Nearby Content") {
+          if (err.matchingElement) {
+            imgDetails.matchingElement = err.matchingElement;
+          }
+          if (err.matchingSnippet) {
+            imgDetails.matchingSnippet = err.matchingSnippet;
+          }
         }
+
         errorGroups[err.type].push(imgDetails);
       });
     });
 
-    // Calculate totals.
+    // Calculate totals
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
     const totalAlerts = ((errorGroups["Short Alt Text"] || []).length) + ((errorGroups["Long Alt Text"] || []).length);
 
@@ -187,6 +218,7 @@ module.exports = async (req, res) => {
       totalAlerts,
       errorGroups
     });
+
   } catch (error) {
     console.error('Error in scraping:', error);
     return res.status(500).json({
