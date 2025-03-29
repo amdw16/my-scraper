@@ -49,7 +49,6 @@ function validateAltText(image, bodyText, $) {
       $(sel).each((i, el) => {
         const elText = $(el).text().trim();
         if (elText.toLowerCase().includes(alt.toLowerCase()) && !matchingElement) {
-          // Return only the text content instead of the entire HTML.
           matchingElement = elText;
         }
       });
@@ -93,6 +92,16 @@ function validateAltText(image, bodyText, $) {
 }
 
 module.exports = async (req, res) => {
+  // Set CORS headers to allow requests from any origin
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // Handle preflight OPTIONS request
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
@@ -134,25 +143,24 @@ module.exports = async (req, res) => {
       images.push({ src, alt });
     });
 
-    // Group images by error/alert category and include a count.
+    // Group images by error type.
     const errorGroups = {};
     images.forEach(image => {
       const imageErrors = validateAltText(image, bodyText, $);
       imageErrors.forEach(err => {
         if (!errorGroups[err.type]) {
-          errorGroups[err.type] = { count: 0, errors: [] };
+          errorGroups[err.type] = [];
         }
         const imgDetails = { src: image.src, alt: image.alt };
         if (err.type === "Matching Nearby Content" && err.matchingElement) {
           imgDetails.matchingElement = err.matchingElement;
         }
-        errorGroups[err.type].errors.push(imgDetails);
-        errorGroups[err.type].count++;
+        errorGroups[err.type].push(imgDetails);
       });
     });
 
     // Calculate the total number of errors across all images.
-    const totalErrors = Object.values(errorGroups).reduce((sum, group) => sum + group.count, 0);
+    const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
 
     // Return the total number of images, total errors, and the error groups.
     return res.status(200).json({
