@@ -33,7 +33,7 @@ function validateAltText(image, bodyText, $) {
     }
   }
 
-  // Rule 3: Short Alt Text (less than 10 characters)
+  // Rule 3: Short Alt Text (less than 20 characters)
   if (alt && alt.length < 20) {
     errors.push({
       type: "Short Alt Text",
@@ -41,7 +41,7 @@ function validateAltText(image, bodyText, $) {
     });
   }
 
-  // Rule 4: Long Alt Text (more than 100 characters)
+  // Rule 4: Long Alt Text (more than 300 characters)
   if (alt && alt.length > 300) {
     errors.push({
       type: "Long Alt Text",
