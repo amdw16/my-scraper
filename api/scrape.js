@@ -40,7 +40,7 @@ function isSuspiciouslyRandom(alt) {
 }
 
 // Helper function: validate alt text and return an array of error objects.
-function validateAltText(image, bodyText, $) {
+function validateAltText(image, visibleText, $) {
   const errors = [];
   const alt = image.alt.trim();
 
@@ -58,7 +58,6 @@ function validateAltText(image, bodyText, $) {
     const altLower = alt.toLowerCase().trim();
     const fileNameLower = srcFileName.toLowerCase().trim();
     const imageExtensions = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
-
     if (
       altLower === fileNameLower ||
       imageExtensions.test(altLower)
@@ -86,53 +85,47 @@ function validateAltText(image, bodyText, $) {
     });
   }
 
-  // Rule 5: Matching Nearby Content – return only the text content and HTML snippet from the matching element.
-if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
-  let matchingElement = null;
-  let matchingSnippet = null;
-
-  // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
-  const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
-
-  outerLoop:
-  for (let sel of selectors) {
-    const foundEls = $(sel);
-    for (let i = 0; i < foundEls.length; i++) {
-      const foundEl = foundEls[i];
-      const elText = $(foundEl).text().trim();
-
-      if (elText.toLowerCase().includes(alt.toLowerCase())) {
-        matchingElement = elText;
-        matchingSnippet = $.html(foundEl).trim();
-        break outerLoop;
+  // Rule 5: Matching Nearby Content – use only the visible text that screen readers would read.
+  if (visibleText && alt && visibleText.toLowerCase().includes(alt.toLowerCase())) {
+    let matchingElement = null;
+    let matchingSnippet = null;
+    // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
+    const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
+    outerLoop:
+    for (let sel of selectors) {
+      const foundEls = $(sel);
+      for (let i = 0; i < foundEls.length; i++) {
+        const foundEl = foundEls[i];
+        const elText = $(foundEl).text().trim();
+        if (elText.toLowerCase().includes(alt.toLowerCase())) {
+          matchingElement = elText;
+          matchingSnippet = $.html(foundEl).trim();
+          break outerLoop;
+        }
       }
     }
-  }
-
-  // Fallback: If no matching element is found via selectors, search raw text.
-  if (!matchingElement) {
-    const altLower = alt.toLowerCase();
-    const bodyLower = bodyText.toLowerCase();
-    const idx = bodyLower.indexOf(altLower);
-    if (idx !== -1) {
-      const snippet = bodyText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
-      matchingElement = snippet;
-      matchingSnippet = snippet; // Use the same snippet for both properties.
+    // Fallback: if nothing is found via selectors, search raw text in visibleText.
+    if (!matchingElement) {
+      const altLower = alt.toLowerCase();
+      const bodyLower = visibleText.toLowerCase();
+      const idx = bodyLower.indexOf(altLower);
+      if (idx !== -1) {
+        const snippet = visibleText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
+        matchingElement = snippet;
+        matchingSnippet = snippet;
+      }
+    }
+    if (matchingElement) {
+      errors.push({
+        type: "Matching Nearby Content",
+        message: "The alt text duplicates nearby text, offering no additional image context.",
+        matchingElement,
+        matchingSnippet
+      });
     }
   }
 
-  if (matchingElement) {
-    errors.push({
-      type: "Matching Nearby Content",
-      message: "The alt text duplicates nearby text, offering no additional image context.",
-      matchingElement,
-      matchingSnippet
-    });
-  }
-}
-
-
-  // Rule 6: Random Characters (updated with multi-heuristic approach)
+  // Rule 6: Random Characters (using multi-heuristic approach)
   if (isSuspiciouslyRandom(alt)) {
     errors.push({
       type: "Random Characters",
@@ -188,7 +181,7 @@ module.exports = async (req, res) => {
       url = 'https://' + url;
     }
 
-    // Fetch the target URL
+    // Fetch the target URL with appropriate headers.
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
@@ -206,41 +199,48 @@ module.exports = async (req, res) => {
 
     const html = await response.text();
     const $ = cheerio.load(html);
-    const bodyText = $('body').text();
 
-    // Collect images with resolved absolute URLs + store entire <img> HTML in snippet
+    // Remove non-readable elements that are not announced by screen readers.
+    $('script, style, [aria-hidden="true"]').remove();
+
+    // Extract only the visible text from elements that screen readers announce.
+    let visibleText = "";
+    const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
+    selectors.forEach(sel => {
+      $(sel).each((i, el) => {
+        visibleText += $(el).text() + " ";
+      });
+    });
+    visibleText = visibleText.trim();
+
+    // Collect images with resolved absolute URLs and store the entire <img> HTML in snippet.
     const images = [];
     $('img').each((i, el) => {
       let src = $(el).attr('src') || '';
       const alt = $(el).attr('alt') || '';
       const snippet = $.html(el).trim(); // entire <img> HTML
-
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // If URL parsing fails, keep src as-is
+        // If URL parsing fails, keep src as-is.
       }
-
       images.push({ src, alt, snippet });
     });
 
-    // Group images by error type
+    // Group images by error type.
     const errorGroups = {};
     images.forEach(image => {
-      const imageErrors = validateAltText(image, bodyText, $);
+      const imageErrors = validateAltText(image, visibleText, $);
       imageErrors.forEach(err => {
         if (!errorGroups[err.type]) {
           errorGroups[err.type] = [];
         }
-
-        // Attach snippet, matchingElement, matchingSnippet, etc.
+        // Attach snippet, matchingElement, and matchingSnippet if available.
         const imgDetails = {
           src: image.src,
           alt: image.alt,
           snippet: image.snippet
         };
-
-        // If "Matching Nearby Content" includes matchingElement or snippet
         if (err.type === "Matching Nearby Content") {
           if (err.matchingElement) {
             imgDetails.matchingElement = err.matchingElement;
@@ -249,12 +249,11 @@ module.exports = async (req, res) => {
             imgDetails.matchingSnippet = err.matchingSnippet;
           }
         }
-
         errorGroups[err.type].push(imgDetails);
       });
     });
 
-    // Calculate totals
+    // Calculate totals.
     const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
     const totalAlerts = ((errorGroups["Short Alt Text"] || []).length) + ((errorGroups["Long Alt Text"] || []).length);
 
