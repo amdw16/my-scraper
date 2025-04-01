@@ -86,49 +86,51 @@ function validateAltText(image, bodyText, $) {
     });
   }
 
-  // Rule 5: Matching Nearby Content
-  if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
-    let matchingElement = null;
-    let matchingSnippet = null;
+  // Rule 5: Matching Nearby Content – return only the text content and HTML snippet from the matching element.
+if (bodyText && alt && bodyText.toLowerCase().includes(alt.toLowerCase())) {
+  let matchingElement = null;
+  let matchingSnippet = null;
 
-    // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
-    const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
+  // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
+  const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
 
-    outerLoop:
-    for (let sel of selectors) {
-      const foundEls = $(sel);
-      for (let i = 0; i < foundEls.length; i++) {
-        const foundEl = foundEls[i];
-        const elText = $(foundEl).text().trim();
+  outerLoop:
+  for (let sel of selectors) {
+    const foundEls = $(sel);
+    for (let i = 0; i < foundEls.length; i++) {
+      const foundEl = foundEls[i];
+      const elText = $(foundEl).text().trim();
 
-        if (elText.toLowerCase().includes(alt.toLowerCase())) {
-          matchingElement = elText;
-          matchingSnippet = $.html(foundEl).trim();
-          break outerLoop;
-        }
+      if (elText.toLowerCase().includes(alt.toLowerCase())) {
+        matchingElement = elText;
+        matchingSnippet = $.html(foundEl).trim();
+        break outerLoop;
       }
-    }
-
-    // If not found in those elements, fallback to searching raw text
-    if (!matchingElement) {
-      const altLower = alt.toLowerCase();
-      const bodyLower = bodyText.toLowerCase();
-      const idx = bodyLower.indexOf(altLower);
-      if (idx !== -1) {
-        const snippet = bodyText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
-        matchingElement = snippet;
-      }
-    }
-
-    if (matchingElement) {
-      errors.push({
-        type: "Matching Nearby Content",
-        message: "The alt text duplicates nearby text, offering no additional image context.",
-        matchingElement,     
-        matchingSnippet
-      });
     }
   }
+
+  // Fallback: If no matching element is found via selectors, search raw text.
+  if (!matchingElement) {
+    const altLower = alt.toLowerCase();
+    const bodyLower = bodyText.toLowerCase();
+    const idx = bodyLower.indexOf(altLower);
+    if (idx !== -1) {
+      const snippet = bodyText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
+      matchingElement = snippet;
+      matchingSnippet = snippet; // Use the same snippet for both properties.
+    }
+  }
+
+  if (matchingElement) {
+    errors.push({
+      type: "Matching Nearby Content",
+      message: "The alt text duplicates nearby text, offering no additional image context.",
+      matchingElement,
+      matchingSnippet
+    });
+  }
+}
+
 
   // Rule 6: Random Characters (updated with multi-heuristic approach)
   if (isSuspiciouslyRandom(alt)) {
