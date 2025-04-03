@@ -254,15 +254,21 @@ module.exports = async (req, res) => {
     });
 
     // Calculate totals.
-    const totalErrors = Object.values(errorGroups).reduce((sum, arr) => sum + arr.length, 0);
     const totalAlerts = ((errorGroups["Short Alt Text"] || []).length) + ((errorGroups["Long Alt Text"] || []).length);
+    const totalErrors = Object.entries(errorGroups).reduce((sum, [type, arr]) => {
+      if (type === "Short Alt Text" || type === "Long Alt Text") {
+      return sum; // Exclude these from total errors.
+      }
+        return sum + arr.length;
+      }, 0);
 
-    return res.status(200).json({
-      totalImages: images.length,
-      totalErrors,
-      totalAlerts,
-      errorGroups
-    });
+   return res.status(200).json({
+     totalImages: images.length,
+     totalErrors,
+     totalAlerts,
+     errorGroups
+     });
+
 
   } catch (error) {
     console.error('Error in scraping:', error);
