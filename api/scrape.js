@@ -1,9 +1,37 @@
 // api/scrape.js
+
 const cheerio = require('cheerio');
-const fetch = require('node-fetch'); // Using node-fetch@2 in CommonJS
+const fetch = require('node-fetch'); // node-fetch@2 in CommonJS
+
+// Helper: create a snippet around matched alt text, highlight it with <b></b>.
+function createHighlightedSnippet(fullText, matchStr, radius = 50) {
+  const fullLower = fullText.toLowerCase();
+  const matchLower = matchStr.toLowerCase();
+
+  const idx = fullLower.indexOf(matchLower);
+  if (idx === -1) {
+    return "";
+  }
+  const start = Math.max(0, idx - radius);
+  const end   = Math.min(fullText.length, idx + matchStr.length + radius);
+
+  let snippet = fullText.slice(start, end);
+
+  // Use a case-insensitive replacement for the first occurrence only
+  const altRegex = new RegExp(matchStr, "i");
+  snippet = snippet.replace(altRegex, `<b>${matchStr}</b>`);
+
+  if (start > 0) {
+    snippet = "..." + snippet;
+  }
+  if (end < fullText.length) {
+    snippet += "...";
+  }
+  return snippet;
+}
 
 module.exports = async (req, res) => {
-  // --- BEGIN CORS HEADERS ---
+  // CORS HEADERS
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -22,24 +50,24 @@ module.exports = async (req, res) => {
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
-  // --- END CORS HEADERS ---
+  // END CORS HEADERS
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
-  let url = req.body?.url || "";
+  let { url } = req.body || {};
   if (!url) {
-    return res.status(400).json({ error: 'Missing "url" in request body.' });
+    return res.status(400).json({
+      error: 'Missing "url" in request body.'
+    });
   }
-
-  // Ensure the URL is absolute; if missing protocol, default to https://
   if (!/^https?:\/\//i.test(url)) {
     url = 'https://' + url;
   }
 
   try {
-    // Attempt the fetch
+    // Fetch the page
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
@@ -49,50 +77,53 @@ module.exports = async (req, res) => {
       }
     });
 
-    // if security measure blocks => often 401 or 403
-    if (response.status === 401 || response.status === 403) {
-      return res.status(response.status).json({ 
+    // Check for security blocking
+    // often 401, 403, 429 (too many requests), or 503
+    if ([401, 403, 429, 503].includes(response.status)) {
+      return res.status(response.status).json({
         error: "This website has security measures that blocked this request."
       });
     }
 
+    // If still not ok => 404, 500, etc.
     if (!response.ok) {
-      // e.g. 404 or 500
-      return res.status(response.status).json({ 
+      return res.status(response.status).json({
         error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
       });
     }
 
+    // Parse HTML
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    // Remove non-readable elements that are not announced by screen readers.
+    // Remove script/style/aria-hidden
     $('script, style, [aria-hidden="true"]').remove();
 
-    // Extract only the visible text from elements that screen readers announce.
-    let visibleText = "";
+    // Extract text in normal casing to bodyText, also a lowercased version
     const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
+    const textChunks = [];
     selectors.forEach(sel => {
       $(sel).each((_, el) => {
-        visibleText += $(el).text() + " ";
+        textChunks.push($(el).text());
       });
     });
-    visibleText = visibleText.trim().toLowerCase();
+    const bodyText = textChunks.join(" ");
+    const bodyTextLower = bodyText.toLowerCase();
 
-    // Collect all <img> with absolute URLs
+    // Gather <img> elements
     const images = [];
     $('img').each((_, el) => {
       let src = $(el).attr('src') || '';
       const alt = ($(el).attr('alt') || '').trim();
       try {
         src = new URL(src, url).toString();
-      } catch (err) {
-        // If URL parsing fails, we keep src as-is
+      } catch (_) {
+        // keep src as is if it fails to parse
       }
       images.push({ src, alt });
     });
 
-    // We'll group by these keys:
+    // Our final groups
     const errorGroups = {
       "Missing Alt Text": [],
       "File Name": [],
@@ -102,111 +133,72 @@ module.exports = async (req, res) => {
       "Manual Check": []
     };
 
+    // Ranking logic
     function categorizeImage(img) {
       const altLower = img.alt.toLowerCase();
-      const srcFileName = img.src.split('/').pop().split('.')[0] || ""; 
-      const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
-
-      // 1) Missing Alt?
+      // 1) Missing alt?
       if (!img.alt) {
-        errorGroups["Missing Alt Text"].push({ 
-          src: img.src, 
-          alt: img.alt 
-        });
-        return; // stop checks
+        errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
+        return;
       }
 
-      // 2) File Name?
+      // 2) File name?
+      const srcFileName = img.src.split('/').pop().split('.')[0] || "";
+      const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (
         altLower === srcFileName.toLowerCase() ||
         extRegex.test(altLower)
       ) {
-        errorGroups["File Name"].push({
-          src: img.src,
-          alt: img.alt
-        });
-        return; // stop checks
+        errorGroups["File Name"].push({ src: img.src, alt: img.alt });
+        return;
       }
 
-      // 3) Matches Nearby Content?
-      // if alt text is found in visibleText
-      if (visibleText.includes(altLower)) {
-        // Attempt to find a short snippet
-        let snippet = "";
-        const idx = visibleText.indexOf(altLower);
-        if (idx !== -1) {
-          // We can try to get about 50 chars around it
-          const start = Math.max(0, idx-50);
-          const end = Math.min(visibleText.length, idx + altLower.length + 50);
-          snippet = visibleText.slice(start, end);
-        }
+      // 3) Matching nearby content?
+      if (bodyTextLower.includes(altLower)) {
+        const snippet = createHighlightedSnippet(bodyText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
-          src: img.src,
-          alt: img.alt,
+          src: img.src, 
+          alt: img.alt, 
           matchingSnippet: snippet
         });
-        return; // stop checks
+        return;
       }
 
-      // 4) Text length check?
+      // 4) Short or long alt text?
       if (img.alt.length < 20) {
-        // short alt text
-        errorGroups["Short Alt Text"].push({
-          src: img.src,
-          alt: img.alt
-        });
+        errorGroups["Short Alt Text"].push({ src: img.src, alt: img.alt });
         return;
-      } 
-      else if (img.alt.length > 300) {
-        // long alt text
-        errorGroups["Long Alt Text"].push({
-          src: img.src,
-          alt: img.alt
-        });
+      }
+      if (img.alt.length > 300) {
+        errorGroups["Long Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
 
-      // 5) Fallback => Manual Check
-      errorGroups["Manual Check"].push({
-        src: img.src,
-        alt: img.alt
-      });
+      // 5) Manual check fallback
+      errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     }
 
-    // Categorize each image
-    images.forEach(img => {
-      categorizeImage(img);
-    });
+    images.forEach(categorizeImage);
 
-    // Summaries
-    const totalImages = images.length;
-
-    // We no longer do "totalErrors" or "totalAlerts" directly on backend 
-    // because you want to do the combining logic front-end. 
-    // But we can optionally keep them if your existing front-end is referencing them:
-    // (They won't strictly match your new definition of "Errors" vs. "Alerts," but we can omit them or set them to 0.)
-    // Let’s just omit them from the response, or set to 0:
-
+    // Return data
     return res.status(200).json({
-      totalImages,
-      // We'll still return something for "totalErrors" / "totalAlerts" 
-      // so older code doesn't break, but set them to 0:
+      totalImages: images.length,
+      // We'll keep totalErrors / totalAlerts as 0, since front-end handles the grouping:
       totalErrors: 0,
       totalAlerts: 0,
       errorGroups
     });
 
   } catch (err) {
-    console.error('Error scraping:', err);
+    console.error("Error scraping:", err);
 
-    // Distinguish certain errors:
-    // For example, if it's an ENOTFOUND => "typo"
+    // If ENOTFOUND or similar => "typo" style message
     if (err.code === 'ENOTFOUND') {
       return res.status(400).json({
         error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
       });
     }
-    // Otherwise, general catch-all:
+    // Fallback:
     return res.status(500).json({
       error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
     });
