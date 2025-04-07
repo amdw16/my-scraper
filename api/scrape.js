@@ -2,148 +2,6 @@
 const cheerio = require('cheerio');
 const fetch = require('node-fetch'); // Using node-fetch@2 in CommonJS
 
-// HELPER: Multi-heuristic check for random/meaningless alt text
-function isSuspiciouslyRandom(alt) {
-  // At least 10 characters
-  if (alt.length < 10) return false;
-
-  // Must be a single token of letters/digits/underscore => no spaces or punctuation
-  const singleTokenRegex = /^[A-Za-z0-9_]+$/;
-  if (!singleTokenRegex.test(alt)) {
-    return false; 
-  }
-
-  let suspiciousScore = 0;
-
-  // Vowel ratio check
-  const match = alt.match(/[aeiou]/gi);
-  const vowelCount = match ? match.length : 0;
-  const ratio = vowelCount / alt.length;
-  if (ratio < 0.2) {
-    suspiciousScore++;
-  }
-
-  // Hex-only check for 16+ length
-  const hexHashRegex = /^[A-Fa-f0-9]+$/;
-  if (hexHashRegex.test(alt) && alt.length >= 16) {
-    suspiciousScore++;
-  }
-
-  // Base64 check for 16+ length
-  const base64Regex = /^[A-Za-z0-9+/]+={0,2}$/;
-  if (base64Regex.test(alt) && alt.length >= 16) {
-    suspiciousScore++;
-  }
-
-  // If 2 or more indicators, we flag as random
-  return suspiciousScore >= 2;
-}
-
-// Helper function: validate alt text and return an array of error objects.
-function validateAltText(image, visibleText, $) {
-  const errors = [];
-  const alt = image.alt.trim();
-
-  // Rule 1: Missing Alt Text
-  if (!alt) {
-    errors.push({ 
-      type: "Missing Alt Text", 
-      message: "This image is missing an alt text description needed for accessibility."
-    });
-  }
-
-  // Rule 2: Alt Text as an Image File Name
-  const srcFileName = image.src.split('/').pop().split('.')[0];
-  if (alt) {
-    const altLower = alt.toLowerCase().trim();
-    const fileNameLower = srcFileName.toLowerCase().trim();
-    const imageExtensions = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
-    if (
-      altLower === fileNameLower ||
-      imageExtensions.test(altLower)
-    ) {
-      errors.push({
-        type: "Alt Text as an Image File Name",
-        message: "The alt text appears to be just a file name or ends with an image extension, rather than a descriptive phrase."
-      });
-    }
-  }
-
-  // Rule 3: Short Alt Text (less than 20 characters)
-  if (alt && alt.length < 20) {
-    errors.push({
-      type: "Short Alt Text",
-      message: "The alt text is too short to provide a meaningful description."
-    });
-  }
-
-  // Rule 4: Long Alt Text (more than 300 characters)
-  if (alt && alt.length > 300) {
-    errors.push({
-      type: "Long Alt Text",
-      message: "The alt text is excessively long, which can confuse users and dilute clarity."
-    });
-  }
-
-  // Rule 5: Matching Nearby Content – use only the visible text that screen readers would read.
-  if (visibleText && alt && visibleText.toLowerCase().includes(alt.toLowerCase())) {
-    let matchingElement = null;
-    let matchingSnippet = null;
-    // Limit selectors to 'h1', 'h2', 'h3', 'p', and 'span'
-    const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
-    outerLoop:
-    for (let sel of selectors) {
-      const foundEls = $(sel);
-      for (let i = 0; i < foundEls.length; i++) {
-        const foundEl = foundEls[i];
-        const elText = $(foundEl).text().trim();
-        if (elText.toLowerCase().includes(alt.toLowerCase())) {
-          matchingElement = elText;
-          matchingSnippet = $.html(foundEl).trim();
-          break outerLoop;
-        }
-      }
-    }
-    // Fallback: if nothing is found via selectors, search raw text in visibleText.
-    if (!matchingElement) {
-      const altLower = alt.toLowerCase();
-      const bodyLower = visibleText.toLowerCase();
-      const idx = bodyLower.indexOf(altLower);
-      if (idx !== -1) {
-        const snippet = visibleText.substring(Math.max(0, idx - 50), idx + alt.length + 50);
-        matchingElement = snippet;
-        matchingSnippet = snippet;
-      }
-    }
-    if (matchingElement) {
-      errors.push({
-        type: "Matching Nearby Content",
-        message: "The alt text duplicates nearby text, offering no additional image context.",
-        matchingElement,
-        matchingSnippet
-      });
-    }
-  }
-
-  // Rule 6: Random Characters (using multi-heuristic approach)
-  if (isSuspiciouslyRandom(alt)) {
-    errors.push({
-      type: "Random Characters",
-      message: "The alt text appears to be a random/meaningless string."
-    });
-  }
-
-  // Rule 7: Keyword String
-  if (alt.split(',').length > 1) {
-    errors.push({
-      type: "Keyword String",
-      message: "The alt text is just a list of keywords instead of a coherent description."
-    });
-  }
-
-  return errors;
-}
-
 module.exports = async (req, res) => {
   // --- BEGIN CORS HEADERS ---
   const allowedOrigins = [
@@ -170,18 +28,18 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
+  let url = req.body?.url || "";
+  if (!url) {
+    return res.status(400).json({ error: 'Missing "url" in request body.' });
+  }
+
+  // Ensure the URL is absolute; if missing protocol, default to https://
+  if (!/^https?:\/\//i.test(url)) {
+    url = 'https://' + url;
+  }
+
   try {
-    let { url } = req.body || {};
-    if (!url) {
-      return res.status(400).json({ error: 'Missing "url" in request body.' });
-    }
-
-    // Ensure the URL is absolute; if missing protocol, default to https://
-    if (!/^https?:\/\//i.test(url)) {
-      url = 'https://' + url;
-    }
-
-    // Fetch the target URL with appropriate headers.
+    // Attempt the fetch
     const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36',
@@ -191,10 +49,18 @@ module.exports = async (req, res) => {
       }
     });
 
+    // if security measure blocks => often 401 or 403
+    if (response.status === 401 || response.status === 403) {
+      return res.status(response.status).json({ 
+        error: "This website has security measures that blocked this request."
+      });
+    }
+
     if (!response.ok) {
-      console.error('Failed to fetch URL, status:', response.status);
-      return res.status(response.status)
-                .json({ error: `Failed to fetch the target URL. Status: ${response.status}` });
+      // e.g. 404 or 500
+      return res.status(response.status).json({ 
+        error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
+      });
     }
 
     const html = await response.text();
@@ -207,74 +73,142 @@ module.exports = async (req, res) => {
     let visibleText = "";
     const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
     selectors.forEach(sel => {
-      $(sel).each((i, el) => {
+      $(sel).each((_, el) => {
         visibleText += $(el).text() + " ";
       });
     });
-    visibleText = visibleText.trim();
+    visibleText = visibleText.trim().toLowerCase();
 
-    // Collect images with resolved absolute URLs and store the entire <img> HTML in snippet.
+    // Collect all <img> with absolute URLs
     const images = [];
-    $('img').each((i, el) => {
+    $('img').each((_, el) => {
       let src = $(el).attr('src') || '';
-      const alt = $(el).attr('alt') || '';
-      const snippet = $.html(el).trim(); // entire <img> HTML
+      const alt = ($(el).attr('alt') || '').trim();
       try {
         src = new URL(src, url).toString();
       } catch (err) {
-        // If URL parsing fails, keep src as-is.
+        // If URL parsing fails, we keep src as-is
       }
-      images.push({ src, alt, snippet });
+      images.push({ src, alt });
     });
 
-    // Group images by error type.
-    const errorGroups = {};
-    images.forEach(image => {
-      const imageErrors = validateAltText(image, visibleText, $);
-      imageErrors.forEach(err => {
-        if (!errorGroups[err.type]) {
-          errorGroups[err.type] = [];
+    // We'll group by these keys:
+    const errorGroups = {
+      "Missing Alt Text": [],
+      "File Name": [],
+      "Matching Nearby Content": [],
+      "Short Alt Text": [],
+      "Long Alt Text": [],
+      "Manual Check": []
+    };
+
+    function categorizeImage(img) {
+      const altLower = img.alt.toLowerCase();
+      const srcFileName = img.src.split('/').pop().split('.')[0] || ""; 
+      const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
+
+      // 1) Missing Alt?
+      if (!img.alt) {
+        errorGroups["Missing Alt Text"].push({ 
+          src: img.src, 
+          alt: img.alt 
+        });
+        return; // stop checks
+      }
+
+      // 2) File Name?
+      if (
+        altLower === srcFileName.toLowerCase() ||
+        extRegex.test(altLower)
+      ) {
+        errorGroups["File Name"].push({
+          src: img.src,
+          alt: img.alt
+        });
+        return; // stop checks
+      }
+
+      // 3) Matches Nearby Content?
+      // if alt text is found in visibleText
+      if (visibleText.includes(altLower)) {
+        // Attempt to find a short snippet
+        let snippet = "";
+        const idx = visibleText.indexOf(altLower);
+        if (idx !== -1) {
+          // We can try to get about 50 chars around it
+          const start = Math.max(0, idx-50);
+          const end = Math.min(visibleText.length, idx + altLower.length + 50);
+          snippet = visibleText.slice(start, end);
         }
-        // Attach snippet, matchingElement, and matchingSnippet if available.
-        const imgDetails = {
-          src: image.src,
-          alt: image.alt,
-          snippet: image.snippet
-        };
-        if (err.type === "Matching Nearby Content") {
-          if (err.matchingElement) {
-            imgDetails.matchingElement = err.matchingElement;
-          }
-          if (err.matchingSnippet) {
-            imgDetails.matchingSnippet = err.matchingSnippet;
-          }
-        }
-        errorGroups[err.type].push(imgDetails);
+        errorGroups["Matching Nearby Content"].push({
+          src: img.src,
+          alt: img.alt,
+          matchingSnippet: snippet
+        });
+        return; // stop checks
+      }
+
+      // 4) Text length check?
+      if (img.alt.length < 20) {
+        // short alt text
+        errorGroups["Short Alt Text"].push({
+          src: img.src,
+          alt: img.alt
+        });
+        return;
+      } 
+      else if (img.alt.length > 300) {
+        // long alt text
+        errorGroups["Long Alt Text"].push({
+          src: img.src,
+          alt: img.alt
+        });
+        return;
+      }
+
+      // 5) Fallback => Manual Check
+      errorGroups["Manual Check"].push({
+        src: img.src,
+        alt: img.alt
       });
+    }
+
+    // Categorize each image
+    images.forEach(img => {
+      categorizeImage(img);
     });
 
-    // Calculate totals.
-    const totalAlerts = ((errorGroups["Short Alt Text"] || []).length) + ((errorGroups["Long Alt Text"] || []).length);
-    const totalErrors = Object.entries(errorGroups).reduce((sum, [type, arr]) => {
-      if (type === "Short Alt Text" || type === "Long Alt Text") {
-      return sum; // Exclude these from total errors.
-      }
-        return sum + arr.length;
-      }, 0);
+    // Summaries
+    const totalImages = images.length;
 
-   return res.status(200).json({
-     totalImages: images.length,
-     totalErrors,
-     totalAlerts,
-     errorGroups
-     });
+    // We no longer do "totalErrors" or "totalAlerts" directly on backend 
+    // because you want to do the combining logic front-end. 
+    // But we can optionally keep them if your existing front-end is referencing them:
+    // (They won't strictly match your new definition of "Errors" vs. "Alerts," but we can omit them or set them to 0.)
+    // Let’s just omit them from the response, or set to 0:
 
+    return res.status(200).json({
+      totalImages,
+      // We'll still return something for "totalErrors" / "totalAlerts" 
+      // so older code doesn't break, but set them to 0:
+      totalErrors: 0,
+      totalAlerts: 0,
+      errorGroups
+    });
 
-  } catch (error) {
-    console.error('Error in scraping:', error);
+  } catch (err) {
+    console.error('Error scraping:', err);
+
+    // Distinguish certain errors:
+    // For example, if it's an ENOTFOUND => "typo"
+    if (err.code === 'ENOTFOUND') {
+      return res.status(400).json({
+        error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
+      });
+    }
+    // Otherwise, general catch-all:
     return res.status(500).json({
-      error: 'Internal server error',
-      detail: error.message
+      error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
     });
   }
 };
