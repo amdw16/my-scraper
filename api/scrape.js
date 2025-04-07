@@ -19,7 +19,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
 
   // Use a case-insensitive replacement for the first occurrence only
   const altRegex = new RegExp(matchStr, "i");
-  snippet = snippet.replace(altRegex, `<b>${matchStr}</b>`);
+  snippet = snippet.replace(altRegex, `**${matchStr}**`);
 
   if (start > 0) {
     snippet = "..." + snippet;
