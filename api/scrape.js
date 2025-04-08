@@ -3,7 +3,7 @@
 const cheerio = require('cheerio');
 const fetch = require('node-fetch'); // node-fetch@2 in CommonJS
 
-// Helper: create a snippet around matched alt text, highlight it with <b></b>.
+// Helper: create a snippet around matched alt text, highlight with **.
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const fullLower = fullText.toLowerCase();
   const matchLower = matchStr.toLowerCase();
@@ -17,7 +17,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
 
   let snippet = fullText.slice(start, end);
 
-  // Use a case-insensitive replacement for the first occurrence only
+  // Do a case-insensitive replace of the first occurrence
   const altRegex = new RegExp(matchStr, "i");
   snippet = snippet.replace(altRegex, `**${matchStr}**`);
 
@@ -31,7 +31,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
 }
 
 module.exports = async (req, res) => {
-  // CORS HEADERS
+  // --- BEGIN CORS HEADERS ---
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -50,7 +50,7 @@ module.exports = async (req, res) => {
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
-  // END CORS HEADERS
+  // --- END CORS HEADERS ---
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
@@ -77,8 +77,7 @@ module.exports = async (req, res) => {
       }
     });
 
-    // Check for security blocking
-    // often 401, 403, 429 (too many requests), or 503
+    // Security blocking: 401, 403, 429, 503
     if ([401, 403, 429, 503].includes(response.status)) {
       return res.status(response.status).json({
         error: "This website has security measures that blocked this request."
@@ -96,10 +95,10 @@ module.exports = async (req, res) => {
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    // Remove script/style/aria-hidden
+    // Remove scripts, styles, aria-hidden
     $('script, style, [aria-hidden="true"]').remove();
 
-    // Extract text in normal casing to bodyText, also a lowercased version
+    // Gather visible text
     const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
     const textChunks = [];
     selectors.forEach(sel => {
@@ -110,7 +109,7 @@ module.exports = async (req, res) => {
     const bodyText = textChunks.join(" ");
     const bodyTextLower = bodyText.toLowerCase();
 
-    // Gather <img> elements
+    // Collect images
     const images = [];
     $('img').each((_, el) => {
       let src = $(el).attr('src') || '';
@@ -118,25 +117,24 @@ module.exports = async (req, res) => {
       try {
         src = new URL(src, url).toString();
       } catch (_) {
-        // keep src as is if it fails to parse
+        // If it fails, keep src as is
       }
       images.push({ src, alt });
     });
 
-    // Our final groups
+    // Our final categories
     const errorGroups = {
       "Missing Alt Text": [],
       "File Name": [],
       "Matching Nearby Content": [],
-      "Short Alt Text": [],
-      "Long Alt Text": [],
       "Manual Check": []
     };
 
     // Ranking logic
     function categorizeImage(img) {
       const altLower = img.alt.toLowerCase();
-      // 1) Missing alt?
+
+      // 1) Missing alt text
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
@@ -153,52 +151,40 @@ module.exports = async (req, res) => {
         return;
       }
 
-      // 3) Matching nearby content?
+      // 3) Matching nearby content
       if (bodyTextLower.includes(altLower)) {
         const snippet = createHighlightedSnippet(bodyText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
-          src: img.src, 
-          alt: img.alt, 
+          src: img.src,
+          alt: img.alt,
           matchingSnippet: snippet
         });
         return;
       }
 
-      // 4) Short or long alt text?
-      if (img.alt.length < 20) {
-        errorGroups["Short Alt Text"].push({ src: img.src, alt: img.alt });
-        return;
-      }
-      if (img.alt.length > 300) {
-        errorGroups["Long Alt Text"].push({ src: img.src, alt: img.alt });
-        return;
-      }
-
-      // 5) Manual check fallback
+      // 4) Otherwise -> Manual Check
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     }
 
+    // Categorize each image
     images.forEach(categorizeImage);
 
-    // Return data
+    // Return the final data
     return res.status(200).json({
       totalImages: images.length,
-      // We'll keep totalErrors / totalAlerts as 0, since front-end handles the grouping:
-      totalErrors: 0,
+      totalErrors: 0,  // front-end calculates these
       totalAlerts: 0,
       errorGroups
     });
 
   } catch (err) {
     console.error("Error scraping:", err);
-
-    // If ENOTFOUND or similar => "typo" style message
+    // If ENOTFOUND => likely typo
     if (err.code === 'ENOTFOUND') {
       return res.status(400).json({
         error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
       });
     }
-    // Fallback:
     return res.status(500).json({
       error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
     });
