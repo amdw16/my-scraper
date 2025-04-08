@@ -15,7 +15,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
 
   let snippet = fullText.slice(start, end);
 
-  // Replace the first occurrence, ignoring case
+  // Replace first occurrence, ignoring case
   const altRegex = new RegExp(matchStr, "i");
   snippet = snippet.replace(altRegex, `**${matchStr}**`);
 
@@ -29,7 +29,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
 }
 
 module.exports = async (req, res) => {
-  // --- CORS HEADERS ---
+  // --- BEGIN CORS HEADERS ---
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -75,28 +75,27 @@ module.exports = async (req, res) => {
       }
     });
 
-    // Check for security blocking: 401, 403, 429, 503
+    // Security blocking => 401, 403, 429, 503
     if ([401, 403, 429, 503].includes(response.status)) {
       return res.status(response.status).json({
         error: "This website has security measures that blocked this request."
       });
     }
 
-    // If not ok => 404, 500, etc.
     if (!response.ok) {
+      // e.g. 404 or 500
       return res.status(response.status).json({
         error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
       });
     }
 
-    // Parse HTML
     const html = await response.text();
     const $ = cheerio.load(html);
 
-    // Remove scripts, styles, aria-hidden
+    // Remove non-visible elements
     $('script, style, [aria-hidden="true"]').remove();
 
-    // Collect visible text
+    // Extract text from these selectors
     const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
     const textChunks = [];
     selectors.forEach(sel => {
@@ -107,7 +106,7 @@ module.exports = async (req, res) => {
     const bodyText = textChunks.join(" ");
     const bodyTextLower = bodyText.toLowerCase();
 
-    // Gather images
+    // Collect images
     const images = [];
     $('img').each((_, el) => {
       let src = $(el).attr('src') || '';
@@ -115,12 +114,12 @@ module.exports = async (req, res) => {
       try {
         src = new URL(src, url).toString();
       } catch (_) {
-        // keep src as-is if parse fails
+        // if parse fails, keep as-is
       }
       images.push({ src, alt });
     });
 
-    // Final category groups
+    // Our final 4 categories
     const errorGroups = {
       "Missing Alt Text": [],
       "File Name": [],
@@ -128,34 +127,28 @@ module.exports = async (req, res) => {
       "Manual Check": []
     };
 
-    // Ranking logic: Missing Alt -> File Name -> Matching -> Manual
+    // Ranking logic: Missing Alt => File Name => Matching => else Manual
     function categorizeImage(img) {
       const altLower = img.alt.toLowerCase();
 
-      // 1) Missing alt
+      // 1) Missing Alt
       if (!img.alt) {
-        errorGroups["Missing Alt Text"].push({
-          src: img.src,
-          alt: img.alt
-        });
+        errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
 
-      // 2) File name check
+      // 2) File Name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (
         altLower === srcFileName.toLowerCase() ||
         extRegex.test(altLower)
       ) {
-        errorGroups["File Name"].push({
-          src: img.src,
-          alt: img.alt
-        });
+        errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
 
-      // 3) Matching nearby content
+      // 3) Matches Nearby Content
       if (bodyTextLower.includes(altLower)) {
         const snippet = createHighlightedSnippet(bodyText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
@@ -166,33 +159,31 @@ module.exports = async (req, res) => {
         return;
       }
 
-      // 4) Otherwise => Manual Check
-      errorGroups["Manual Check"].push({
-        src: img.src,
-        alt: img.alt
-      });
+      // 4) Fallback => Manual Check
+      errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     }
 
+    // Categorize each <img>
     images.forEach(categorizeImage);
 
-    // Return data
+    // Return results
     return res.status(200).json({
       totalImages: images.length,
-      // We'll let the front-end compute how many are errors vs. alerts
-      totalErrors: 0,
+      totalErrors: 0, // front-end sums them up
       totalAlerts: 0,
       errorGroups
     });
 
   } catch (err) {
     console.error("Error scraping:", err);
-    // If it's ENOTFOUND => likely a typo
+
+    // If we see ENOTFOUND => domain not found => "typo"
     if (err.code === 'ENOTFOUND') {
       return res.status(400).json({
         error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
       });
     }
-    // Fallback
+    // Otherwise fallback
     return res.status(500).json({
       error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
     });
