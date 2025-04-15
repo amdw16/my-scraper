@@ -3,7 +3,7 @@
 const cheerio = require('cheerio');
 const fetch = require('node-fetch'); // node-fetch@2 in CommonJS
 
-// Highlights the matched alt text with '**' in the snippet
+// 1) Utility: highlight the matched alt text (for snippet display)
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const fullLower = fullText.toLowerCase();
   const matchLower = matchStr.toLowerCase();
@@ -28,6 +28,62 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
     snippet += "...";
   }
   return snippet;
+}
+
+// 2) Collect words *before* the <img> in the DOM (up to maxWords)
+function collectWordsBefore($, $img, maxWords) {
+  const words = [];
+  let $current = $img.prev(); // Cheerio's reference to the *previous sibling*
+
+  while ($current.length && words.length < maxWords) {
+    if ($current[0].type === 'text') {
+      const textParts = $current[0].data.trim().split(/\s+/);
+      // We unshift so that the earliest text is at the end
+      words.unshift(...textParts);
+    } else if ($current[0].type === 'tag') {
+      const txt = $current.text().trim();
+      if (txt) {
+        const textParts = txt.split(/\s+/);
+        words.unshift(...textParts);
+      }
+    }
+    $current = $current.prev();
+  }
+
+  // We only need up to `maxWords`, from the end
+  return words.slice(-maxWords);
+}
+
+// 3) Collect words *after* the <img> in the DOM (up to maxWords)
+function collectWordsAfter($, $img, maxWords) {
+  const words = [];
+  let $current = $img.next(); // Cheerio's reference to the *next sibling*
+
+  while ($current.length && words.length < maxWords) {
+    if ($current[0].type === 'text') {
+      const textParts = $current[0].data.trim().split(/\s+/);
+      words.push(...textParts);
+    } else if ($current[0].type === 'tag') {
+      const txt = $current.text().trim();
+      if (txt) {
+        const textParts = txt.split(/\s+/);
+        words.push(...textParts);
+      }
+    }
+    $current = $current.next();
+  }
+
+  // We only need up to `maxWords`
+  return words.slice(0, maxWords);
+}
+
+// 4) Combine before+after text for a single <img>
+function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
+  const before = collectWordsBefore($, $img, wordsBefore);
+  const after = collectWordsAfter($, $img, wordsAfter);
+
+  // Combine them
+  return [...before, ...after].join(" ");
 }
 
 module.exports = async (req, res) => {
@@ -98,18 +154,7 @@ module.exports = async (req, res) => {
     // Remove scripts, styles, aria-hidden
     $('script, style, [aria-hidden="true"]').remove();
 
-    // Gather visible text from these selectors
-    const selectors = ['h1', 'h2', 'h3', 'p', 'span'];
-    const textChunks = [];
-    selectors.forEach(sel => {
-      $(sel).each((_, el) => {
-        textChunks.push($(el).text());
-      });
-    });
-    const bodyText = textChunks.join(" ");
-    const bodyTextLower = bodyText.toLowerCase();
-
-    // Collect all <img> elements
+    // Collect all <img> elements, keep track of their Cheerio element
     const images = [];
     $('img').each((_, el) => {
       let src = $(el).attr('src') || '';
@@ -119,7 +164,11 @@ module.exports = async (req, res) => {
       } catch (_) {
         // if URL parse fails, keep original
       }
-      images.push({ src, alt });
+      images.push({
+        src,
+        alt,
+        $el: $(el) // We'll need this for local text
+      });
     });
 
     // Only 4 categories: Missing Alt, File Name, Matching, Manual Check
@@ -130,11 +179,7 @@ module.exports = async (req, res) => {
       "Manual Check": []
     };
 
-    // Ranking logic: 
-    // 1) Missing Alt 
-    // 2) File Name 
-    // 3) Matching Nearby Content 
-    // 4) Manual Check
+    // Categorize each image
     function categorizeImage(img) {
       const altLower = img.alt.toLowerCase();
 
@@ -155,9 +200,15 @@ module.exports = async (req, res) => {
         return;
       }
 
-      // 3) Matches Nearby Content?
-      if (bodyTextLower.includes(altLower)) {
-        const snippet = createHighlightedSnippet(bodyText, img.alt, 50);
+      // 3) Matching Nearby Content?
+      //    Instead of checking entire page text, we now gather only ~300 words
+      //    before and after the image in the DOM.
+      const localText = getNearbyText($, img.$el, 300, 300);
+      const localTextLower = localText.toLowerCase();
+
+      if (localTextLower.includes(altLower)) {
+        // Grab a short snippet with the alt text highlighted
+        const snippet = createHighlightedSnippet(localText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
           src: img.src,
           alt: img.alt,
