@@ -183,7 +183,7 @@ module.exports = async (req, res) => {
         return;
       }
       // 3) Check if alt text duplicates nearby content
-      const localText = getNearbyText($, img.$el, 300, 300);
+      const localText = getNearbyText($, img.$el, 400, 400);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
