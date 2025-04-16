@@ -4,35 +4,34 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// Utility: highlight the matched alt text (for snippet display)
+// Utility: Highlight a snippet with the matching alt text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
-  const fullLower = fullText.toLowerCase();
-  const matchLower = matchStr.toLowerCase();
-  const idx = fullLower.indexOf(matchLower);
+  const lowerText = fullText.toLowerCase();
+  const lowerMatch = matchStr.toLowerCase();
+  const idx = lowerText.indexOf(lowerMatch);
   if (idx === -1) return "";
   const start = Math.max(0, idx - radius);
   const end = Math.min(fullText.length, idx + matchStr.length + radius);
   let snippet = fullText.slice(start, end);
-  const altRegex = new RegExp(matchStr, "i");
-  snippet = snippet.replace(altRegex, `**${matchStr}**`);
+  const regex = new RegExp(matchStr, "i");
+  snippet = snippet.replace(regex, `**${matchStr}**`);
   if (start > 0) snippet = "..." + snippet;
-  if (end < fullLower.length) snippet += "...";
+  if (end < fullText.length) snippet += "...";
   return snippet;
 }
 
-// Collect words *before* the <img> (up to maxWords)
+// Collect words before an element (up to maxWords)
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
   while ($current.length && words.length < maxWords) {
     if ($current[0].type === 'text') {
-      const textParts = $current[0].data.trim().split(/\s+/);
-      words.unshift(...textParts);
+      const parts = $current[0].data.trim().split(/\s+/);
+      words.unshift(...parts);
     } else if ($current[0].type === 'tag') {
       const txt = $current.text().trim();
       if (txt) {
-        const textParts = txt.split(/\s+/);
-        words.unshift(...textParts);
+        words.unshift(...txt.split(/\s+/));
       }
     }
     $current = $current.prev();
@@ -40,19 +39,18 @@ function collectWordsBefore($, $img, maxWords) {
   return words.slice(-maxWords);
 }
 
-// Collect words *after* the <img> (up to maxWords)
+// Collect words after an element (up to maxWords)
 function collectWordsAfter($, $img, maxWords) {
   const words = [];
   let $current = $img.next();
   while ($current.length && words.length < maxWords) {
     if ($current[0].type === 'text') {
-      const textParts = $current[0].data.trim().split(/\s+/);
-      words.push(...textParts);
+      const parts = $current[0].data.trim().split(/\s+/);
+      words.push(...parts);
     } else if ($current[0].type === 'tag') {
       const txt = $current.text().trim();
       if (txt) {
-        const textParts = txt.split(/\s+/);
-        words.push(...textParts);
+        words.push(...txt.split(/\s+/));
       }
     }
     $current = $current.next();
@@ -60,40 +58,34 @@ function collectWordsAfter($, $img, maxWords) {
   return words.slice(0, maxWords);
 }
 
-// Combine before+after text for a single <img>
+// Combine before and after text for the element
 function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
   return [...before, ...after].join(" ");
 }
 
-// Helper: convert a relative URL to an absolute URL
+// Convert a relative URL to an absolute URL, based on baseUrl
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
     return new URL(src, baseUrl).toString();
-  } catch (_) {
+  } catch (e) {
     return src;
   }
 }
 
-// autoScroll: scroll the page so that lazy-loaded images appear
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise((resolve) => {
-      let totalHeight = 0;
-      const distance = 500;
-      const timer = setInterval(() => {
-        const scrollHeight = document.body.scrollHeight;
-        window.scrollBy(0, distance);
-        totalHeight += distance;
-        if (totalHeight >= scrollHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 500);
-    });
-  });
+// Limited auto-scroll: Scroll a fixed number of times to reduce execution time.
+async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 500) {
+  let scrolls = 0;
+  while (scrolls < maxScrolls) {
+    const previousHeight = await page.evaluate(() => document.body.scrollHeight);
+    await page.evaluate((y) => window.scrollBy(0, y), distance);
+    await page.waitForTimeout(delay);
+    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+    if (newHeight === previousHeight) break;
+    scrolls++;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -126,7 +118,6 @@ module.exports = async (req, res) => {
 
   let browser = null;
   try {
-    // Directly use chromium.executablePath() to locate the Chromium binary.
     const execPath = await chromium.executablePath();
     browser = await puppeteer.launch({
       args: chromium.args,
@@ -136,7 +127,7 @@ module.exports = async (req, res) => {
 
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    await autoScroll(page);
+    await autoScroll(page, 10, 500, 500); // Limited scrolling
     const html = await page.content();
     await browser.close();
     browser = null;
@@ -159,12 +150,12 @@ module.exports = async (req, res) => {
 
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) Check if alt is missing
+      // 1) Missing alt?
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) Check if alt text is the same as the file name or is just a file name
+      // 2) Check if alt text is a file name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
@@ -182,7 +173,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise, require a manual check
+      // 4) Otherwise flag for manual check
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
 
