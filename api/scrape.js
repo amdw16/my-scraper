@@ -1,40 +1,68 @@
 /*************************************************************************
- *  Scribely Alt‑Text Checker – v3 (2025‑04‑16)
- *  * Fast – never downloads image bytes
- *  * 100 % free ‑ fits Vercel’s 30 s / 1 GB limits
+ * Scribely Alt‑Text Checker – v4  (two‑stage: fast HTML → light Chrome)
+ * – Primary path: node‑fetch + Cheerio (no browser) … 1‑3 s
+ * – Fallback : headless Chrome with JS disabled & all requests aborted
+ *              … +4‑5 s, still <30 s total, <128 MB RAM
  *************************************************************************/
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio   = require('cheerio');
+const fetch     = require('node-fetch');
 
-/*───────── Tunables ─────────────────────────────────────────*/
-const NAV_TIMEOUT_MS  = 10000;   // page.goto cap
-const SCROLL_STEPS    = 5;       // viewport scrolls to trigger lazy‑load JS
-const IDLE_WAIT_MS    = 800;     // network‑idle quiet window
-const OVERALL_CAP_MS  = 18000;   // absolut max inside Puppeteer
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+/*──────── Rule engine (shared) ─────────────────────────────*/
+function buildReport(imgs, pageUrl) {
+  const groups = {
+    'Missing Alt Text':        [],
+    'File Name':               [],
+    'Matching Nearby Content': [],
+    'Manual Check':            []
+  };
+  const extRE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
 
-/*───────── Handler ─────────────────────────────────────────*/
-module.exports = async (req, res) => {
-  /* 0. CORS & input ------------------------------------------------*/
-  const okOrigins = [
-    'https://scribely-v2.webflow.io',
-    'https://scribely.com',       'https://www.scribely.com',
-    'https://scribelytribe.com',  'https://www.scribelytribe.com'
-  ];
-  const origin = req.headers.origin || '*';
-  res.setHeader('Access-Control-Allow-Origin',
-                okOrigins.includes(origin) ? origin : '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  if (req.method === 'OPTIONS') return res.status(200).end();   // ← log #1
-  if (req.method !== 'POST')    return res.status(405).json({ error: 'POST only' });
+  imgs.forEach(it => {
+    try { it.src = new URL(it.src, pageUrl).toString(); } catch {}
+    if (!it.src || it.src.includes('bat.bing.com/action/0')) return;
 
-  let { url } = req.body || {};
-  if (!url)                       return res.status(400).json({ error: 'Missing url' });
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+    const altLower = it.alt.toLowerCase();
+    const baseName = (it.src.split('/').pop() || '').split('.')[0];
 
-  /* 1. Launch headless Chrome -------------------------------------*/
+    if (!it.alt)                                        return groups['Missing Alt Text'].push(it);
+    if (altLower === baseName.toLowerCase() || extRE.test(altLower))
+                                                       return groups['File Name'].push(it);
+    if (altLower && it.nearby.toLowerCase().includes(altLower)) {
+      const i = it.nearby.toLowerCase().indexOf(altLower);
+      it.matchingSnippet = it.nearby
+        .slice(Math.max(0, i-50), i+altLower.length+50)
+        .replace(new RegExp(it.alt,'i'), m=>'**'+m+'**');
+      return groups['Matching Nearby Content'].push(it);
+    }
+    groups['Manual Check'].push(it);
+  });
+
+  return { totalImages: imgs.length, errorGroups: groups };
+}
+
+/*──────── Primary: fast HTML scrape (≤3 s) ────────────────*/
+async function fastHtmlPass(url) {
+  const html = await (await fetch(url, { timeout: 6000, headers: {
+    'User-Agent': 'Mozilla/5.0 (compatible; ScribelyBot/1.0; +https://scribely.com)',
+    'Accept-Language': 'en-US,en;q=0.9'
+  }})).text();
+
+  const $ = cheerio.load(html);
+  const imgs = $('img').map((_, el) => {
+    const $el = $(el);
+    const src = $el.attr('src')
+            || $el.attr('data-src') || $el.attr('data-lazy') || $el.attr('data-original') || '';
+    const alt = ($el.attr('alt') || '').trim();
+    return { src, alt, nearby: '' };   // no nearby text in fast path
+  }).get();
+
+  return buildReport(imgs, url);
+}
+
+/*──────── Fallback: light Chrome (JS disabled, 4‑5 s) ─────*/
+async function lightChromePass(url) {
   const execPath = await chromium.executablePath();
   const browser  = await puppeteer.launch({
     executablePath: execPath,
@@ -48,111 +76,63 @@ module.exports = async (req, res) => {
 
   try {
     const page = await browser.newPage();
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
-      'AppleWebKit/537.36 (KHTML, like Gecko) ' +
-      'Chrome/123.0.0.0 Safari/537.36');
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-
-    /* 1‑a. Abort every heavyweight asset (including **images**)  ----*/
+    await page.setJavaScriptEnabled(false);         // ← saves huge time/ram
     await page.setRequestInterception(true);
-    const abort = new Set(['stylesheet','font','media','image','other']);
-    page.on('request', r => abort.has(r.resourceType()) ? r.abort() : r.continue());
-
-    /* 1‑b. Navigate (DOM only, 10 s cap) ---------------------------*/
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
-
-    /* 1‑c. Nudge any IntersectionObserver lazy‑load JS ------------*/
-    for (let i = 0; i < SCROLL_STEPS; i++) {
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-      await sleep(120);
-    }
-    await Promise.race([
-      page.waitForNetworkIdle({ idleTime: IDLE_WAIT_MS }),
-      sleep(OVERALL_CAP_MS - NAV_TIMEOUT_MS)
-    ]);
-
-    /* 2. Harvest <img> data in‑page (zero downloads) --------------*/
-    const raw = await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      function neighborWords(node, dir) {
-        let cur = node[dir], words = [];
-        while (cur && words.length < 300) {
-          if (cur.nodeType === 3 && cur.textContent.trim()) {
-            words.push(...cur.textContent.trim().split(/\s+/));
-          } else if (cur.nodeType === 1) {
-            const t = cur.textContent.trim(); if (t) words.push(...t.split(/\s+/));
-          }
-          cur = cur[dir];
-        }
-        return words;
-      }
-      return imgs.map(img => {
-        const src = img.currentSrc || img.src ||
-                    img.dataset?.src || img.dataset?.lazy || img.dataset?.original || '';
-        const before = neighborWords(img,'previousSibling');
-        const after  = neighborWords(img,'nextSibling');
-        return {
-          src,
-          alt: (img.getAttribute('alt') || '').trim(),
-          nearby: [...before,...after].join(' ')
-        };
-      });
-    });
-
-    /* 3. Rule engine ----------------------------------------------*/
-    const errorGroups = {
-      'Missing Alt Text':        [],
-      'File Name':               [],
-      'Matching Nearby Content': [],
-      'Manual Check':            []
-    };
-    const extRE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
-
-    raw.forEach(it => {
-      try { it.src = new URL(it.src, url).toString(); } catch {}
-      if (!it.src || it.src.includes('bat.bing.com/action/0')) return;
-
-      const altLower = it.alt.toLowerCase();
-      const baseName = (it.src.split('/').pop() || '').split('.')[0];
-
-      if (!it.alt)                                 return errorGroups['Missing Alt Text'].push(it);
-      if (altLower === baseName.toLowerCase() ||
-          extRE.test(altLower))                    return errorGroups['File Name'].push(it);
-      if (altLower && it.nearby.toLowerCase().includes(altLower)) {
-        const i = it.nearby.toLowerCase().indexOf(altLower);
-        it.matchingSnippet = it.nearby
-          .slice(Math.max(0, i-50), i+altLower.length+50)
-          .replace(new RegExp(it.alt,'i'), m=>'**'+m+'**');
-        return errorGroups['Matching Nearby Content'].push(it);
-      }
-      errorGroups['Manual Check'].push(it);
-    });
-
+    page.on('request', r => r.abort());             // abort everything, need HTML only
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+    const html = await page.content();
+    const $ = cheerio.load(html);
+    const imgs = $('img').map((_, el) => {
+      const $el = $(el);
+      const src = $el.attr('src')
+              || $el.attr('data-src') || $el.attr('data-lazy') || $el.attr('data-original') || '';
+      const alt = ($el.attr('alt') || '').trim();
+      return { src, alt, nearby: '' };
+    }).get();
     await browser.close();
-    return res.status(200).json({             // ← log #2
-      totalImages: raw.length,
-      errorGroups
-    });
+    return buildReport(imgs, url);
+
+  } catch (e) {
+    await browser.close();
+    throw e;
+  }
+}
+
+/*──────── HTTP handler ───────────────────────────────────*/
+module.exports = async (req, res) => {
+  /* CORS + method */
+  const okOrigins = [
+    'https://scribely-v2.webflow.io',  'https://scribely.com',
+    'https://www.scribely.com',        'https://scribelytribe.com',
+    'https://www.scribelytribe.com'
+  ];
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin',
+                okOrigins.includes(origin) ? origin : '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'POST only' });
+
+  let { url } = req.body || {};
+  if (!url)                       return res.status(400).json({ error: 'Missing url' });
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+
+  try {
+    /* 1. Fast pass */
+    const quick = await fastHtmlPass(url);
+
+    /* If we already found plenty of images, ship it */
+    if (quick.totalImages >= 20) {
+      return res.status(200).json({ ...quick, engine: 'fast-html' });
+    }
+
+    /* 2. Fallback to light Chrome */
+    const deep = await lightChromePass(url);
+    return res.status(200).json({ ...deep, engine: 'light-chrome' });
 
   } catch (err) {
-    console.error('alt‑checker fail:', err.message);
-    await browser.close();
-
-    /* 4. Fallback to plain HTML (no JS) so user still gets *something* */
-    try {
-      const fetch = require('node-fetch');
-      const html  = await (await fetch(url,{ timeout: 7000 })).text();
-      return res.status(200).json({
-        totalImages: cheerio.load(html)('img').length,
-        errorGroups: {
-          'Missing Alt Text': [], 'File Name': [],
-          'Matching Nearby Content': [], 'Manual Check': []
-        },
-        fallback: true
-      });
-    } catch {
-      return res.status(500).json({ error: 'Site blocks headless browsers.' });
-    }
+    console.error('alt‑checker fatal:', err.message);
+    return res.status(500).json({ error: 'Unable to analyse this URL.' });
   }
 };
