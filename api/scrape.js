@@ -4,9 +4,8 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// ------------------------------
-// Utility: Create a highlighted snippet in text 
-// (used for nearby content checking)
+// ------------------------------------------
+// Utility: Create a highlighted snippet from text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -22,8 +21,8 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// ------------------------------
-// Functions to collect nearby text around an <img>
+// ------------------------------------------
+// Functions to collect nearby text for an <img>
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -60,13 +59,13 @@ function collectWordsAfter($, $img, maxWords) {
   return words.slice(0, maxWords);
 }
 
-function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
+function getNearbyText($, $img, wordsBefore = 500, wordsAfter = 500) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
   return [...before, ...after].join(" ");
 }
 
-// ------------------------------
+// ------------------------------------------
 // Helper: Convert a (relative) URL to an absolute URL based on baseUrl
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
@@ -77,9 +76,54 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// ------------------------------
+// ------------------------------------------
+// Robust auto-scroll that scrolls until no new images are loaded
+async function autoScroll(page, maxTimeMS = 25000, stableIterations = 3) {
+  const startTime = Date.now();
+  let lastImageCount = await page.evaluate(() => document.querySelectorAll('img').length);
+  let stableCount = 0;
+  
+  while (Date.now() - startTime < maxTimeMS && stableCount < stableIterations) {
+    // Force lazy-loading update for all images on each iteration:
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll('img')).forEach(img => {
+        const currentSrc = img.getAttribute('src') || "";
+        if (!currentSrc || currentSrc.trim() === "" || currentSrc === "about:blank" || currentSrc.includes("s_1x2.gif")) {
+          if (img.dataset) {
+            if (img.dataset.src) {
+              img.src = img.dataset.src;
+            } else if (img.dataset.lazy) {
+              img.src = img.dataset.lazy;
+            } else if (img.dataset.original) {
+              img.src = img.dataset.original;
+            }
+          }
+        }
+      });
+    });
+    
+    // Scroll down one viewport height
+    await page.evaluate(() => window.scrollBy(0, window.innerHeight));
+    // Wait 500ms for content to load
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Check how many images we have now
+    const newCount = await page.evaluate(() => document.querySelectorAll('img').length);
+    if (newCount === lastImageCount) {
+      stableCount++;
+    } else {
+      stableCount = 0;
+      lastImageCount = newCount;
+    }
+  }
+}
+
+// ------------------------------------------
 // MAIN FUNCTION
 module.exports = async (req, res) => {
+  const debugData = {}; // optional debug information
+  const startTime = Date.now();
+
   // Set CORS headers
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
@@ -98,14 +142,17 @@ module.exports = async (req, res) => {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
-  let { url } = req.body || {};
+  let { url, debug } = req.body || {};
+  // Allow debug flag via query as well
+  debug = debug || req.query.debug;
+  
   if (!url) {
     return res.status(400).json({ error: 'Missing "url" in request body.' });
   }
   if (!/^https?:\/\//i.test(url)) {
     url = 'https://' + url;
   }
-
+  
   let browser = null;
   let html = "";
   try {
@@ -116,33 +163,21 @@ module.exports = async (req, res) => {
       headless: chromium.headless
     });
     const page = await browser.newPage();
-    // Use a fast load event for speed (domcontentloaded)
+    
+    // Use a fast loading strategy: wait for domcontentloaded
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     
-    // Wait 1 second to give lazy-load scripts a chance to run
+    // Wait 1 second to allow lazy-loaded scripts to update images
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    // Force lazy-loading: if images have common lazy-load attributes, set src.
-    await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      imgs.forEach(img => {
-        const currentSrc = img.getAttribute('src') || "";
-        if (!currentSrc || currentSrc.trim() === "" || currentSrc.includes("s_1x2.gif")) {
-          if (img.dataset) {
-            if (img.dataset.src) {
-              img.src = img.dataset.src;
-            } else if (img.dataset.lazy) {
-              img.src = img.dataset.lazy;
-            } else if (img.dataset.original) {
-              img.src = img.dataset.original;
-            }
-          }
-        }
-      });
-    });
+    // For pages that load images dynamically, auto-scroll until image count stabilizes
+    await autoScroll(page);
     
-    // Retrieve the final HTML
+    // Extra wait for final lazy-loading updates
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
     html = await page.content();
+    if (debug) debugData.pageLoadTime = Date.now() - startTime;
     await browser.close();
     browser = null;
   } catch (err) {
@@ -157,19 +192,21 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const images = [];
     $('img').each((_, el) => {
-      // Get the src; if missing, check common lazy-loading attributes
+      // Prefer the standard src; if empty, check common lazy-loading attributes
       let rawSrc = $(el).attr('src') || '';
       if (!rawSrc || rawSrc.trim() === "" || rawSrc === "about:blank") {
         rawSrc = $(el).attr('data-src') || $(el).attr('data-lazy') || $(el).attr('data-original') || '';
       }
       const alt = ($(el).attr('alt') || '').trim();
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Optionally filter out known tracking pixels (for example)
+      // Filter out known tracking pixels if desired
       if (finalSrc.includes("bat.bing.com/action/0")) return;
       if (finalSrc) {
         images.push({ src: finalSrc, alt, $el: $(el) });
       }
     });
+    
+    if (debug) debugData.totalImagesFound = images.length;
     
     const errorGroups = {
       "Missing Alt Text": [],
@@ -180,20 +217,20 @@ module.exports = async (req, res) => {
     
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) If the alt text is missing
+      // 1) If the alt text is missing, flag as error.
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) If alt text is basically the file name
+      // 2) If alt text is the file name (or appears to be)
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 3) If the alt text is duplicated in nearby text content
-      const localText = getNearbyText($, img.$el, 300, 300);
+      // 3) If alt text appears in the nearby text
+      const localText = getNearbyText($, img.$el, 500, 500);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
@@ -203,14 +240,24 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise, mark for manual review
+      // 4) Otherwise flag for manual review
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
-    return res.status(200).json({
+    const result = {
       totalImages: images.length,
       errorGroups
-    });
+    };
+    
+    if (debug) {
+      result.debug = {
+        processingTime: Date.now() - startTime,
+        htmlLength: html.length,
+        debugData
+      };
+    }
+    
+    return res.status(200).json(result);
     
   } catch (parseError) {
     console.error("Error parsing HTML:", parseError);
