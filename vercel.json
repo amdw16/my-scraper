@@ -3,7 +3,7 @@
     "api/scrape.js": {
       "includeFiles": "node_modules/@sparticuz/chromium/**/*",
       "memory": 1024,
-      "maxDuration": 60
+      "maxDuration": 90
     }
   }
 }
