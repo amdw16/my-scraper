@@ -1,9 +1,11 @@
+// api/scrape.js
+
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// -------------------------------------------------------
-// Utility: Create a highlighted snippet in text
+// ------------------------------------------
+// Utility: Create a highlighted snippet (for potential future use)
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -19,8 +21,8 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// -------------------------------------------------------
-// Functions to collect nearby text around an <img>
+// ------------------------------------------
+// Functions to collect nearby text (unchanged – for alt text checks)
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -36,7 +38,6 @@ function collectWordsBefore($, $img, maxWords) {
   }
   return words.slice(-maxWords);
 }
-
 function collectWordsAfter($, $img, maxWords) {
   const words = [];
   let $current = $img.next();
@@ -52,15 +53,12 @@ function collectWordsAfter($, $img, maxWords) {
   }
   return words.slice(0, maxWords);
 }
-
 function getNearbyText($, $img, wordsBefore = 500, wordsAfter = 500) {
-  const before = collectWordsBefore($, $img, wordsBefore);
-  const after = collectWordsAfter($, $img, wordsAfter);
-  return [...before, ...after].join(" ");
+  return [...collectWordsBefore($, $img, wordsBefore), ...collectWordsAfter($, $img, wordsAfter)].join(" ");
 }
 
-// -------------------------------------------------------
-// Helper: Convert a (relative) URL to an absolute URL
+// ------------------------------------------
+// Helper: Convert a relative URL to an absolute URL
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -70,66 +68,87 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// -------------------------------------------------------
-// Smart scrolling: scrolls by one viewport until image count stabilizes
-// or until a maximum time limit is reached.
-async function smartScroll(page, { maxTimeMS = 10000, stableIterations = 2 } = {}) {
+// ------------------------------------------
+// Smart Scroll Loop – scrolls until new images stop loading
+async function smartScroll(page, { maxTimeMS = 15000, stableIterations = 3 } = {}) {
   const startTime = Date.now();
-  let prevImageCount = await page.evaluate(() => document.querySelectorAll('img').length);
+  let prevCount = await page.evaluate(() => document.querySelectorAll('img').length);
   let stableCount = 0;
   
-  while (Date.now() - startTime < maxTimeMS && stableCount < stableIterations) {
-    // Force lazy-loading update.
+  while ((Date.now() - startTime) < maxTimeMS && stableCount < stableIterations) {
+    // Force lazy-loading update on every iteration.
     await page.evaluate(() => {
       Array.from(document.querySelectorAll('img')).forEach(img => {
         const currentSrc = img.getAttribute('src') || "";
         if (!currentSrc || currentSrc.trim() === "" || currentSrc === "about:blank" || currentSrc.includes("s_1x2.gif")) {
           if (img.dataset) {
-            if (img.dataset.src) {
-              img.src = img.dataset.src;
-            } else if (img.dataset.lazy) {
-              img.src = img.dataset.lazy;
-            } else if (img.dataset.original) {
-              img.src = img.dataset.original;
-            }
+            if (img.dataset.src) { img.src = img.dataset.src; }
+            else if (img.dataset.lazy) { img.src = img.dataset.lazy; }
+            else if (img.dataset.original) { img.src = img.dataset.original; }
           }
         }
       });
     });
     
-    // Scroll by one viewport height.
+    // Scroll one viewport height.
     await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-    // Wait briefly for new images to load.
+    // Wait briefly.
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    const currentImageCount = await page.evaluate(() => document.querySelectorAll('img').length);
-    if (currentImageCount === prevImageCount) {
+    // Check how many images are loaded now.
+    const currentCount = await page.evaluate(() => document.querySelectorAll('img').length);
+    if (currentCount === prevCount) {
       stableCount++;
     } else {
       stableCount = 0;
-      prevImageCount = currentImageCount;
+      prevCount = currentCount;
     }
   }
 }
 
-// -------------------------------------------------------
-// Timeout wrapper: ensures a response even if scraping takes too long.
+// ------------------------------------------
+// Wait until most images have finished loading
+async function waitForImagesLoad(page, { timeoutMS = 5000, minLoadedPercent = 0.8, checkInterval = 500 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMS) {
+    // Evaluate the page: count images that are loaded (naturalWidth > 50)
+    const loadedData = await page.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      const total = imgs.length;
+      let loaded = 0;
+      imgs.forEach(img => {
+        if (img.complete && (img.naturalWidth > 50 || img.getAttribute('src').includes('placeholder'))) {
+          loaded++;
+        }
+      });
+      return { total, loaded };
+    });
+    if (loadedData.total === 0 || loadedData.loaded / loadedData.total >= minLoadedPercent) {
+      break;
+    }
+    await new Promise(resolve => setTimeout(resolve, checkInterval));
+  }
+}
+
+// ------------------------------------------
+// Global timeout wrapper for the scraping process.
 async function withTimeout(promise, timeoutMS = 28000) {
   let timeout;
   const timeoutPromise = new Promise((resolve, reject) => {
-    timeout = setTimeout(() => {
-      resolve({ timeout: true });
-    }, timeoutMS);
+    timeout = setTimeout(() => resolve({ timeout: true }), timeoutMS);
   });
   const result = await Promise.race([promise, timeoutPromise]);
   clearTimeout(timeout);
   return result;
 }
 
-// -------------------------------------------------------
+// ------------------------------------------
 // MAIN FUNCTION
 module.exports = async (req, res) => {
-  // Always set CORS headers (even on errors)
+  const debugData = {};
+  const overallStart = Date.now();
+
+  // Always set CORS headers.
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -147,7 +166,7 @@ module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
-
+  
   let { url, debug } = req.body || {};
   debug = debug || req.query.debug;
   
@@ -158,8 +177,8 @@ module.exports = async (req, res) => {
     url = 'https://' + url;
   }
   
-  const overallStart = Date.now();
-  let browser = null, html = "";
+  let browser = null;
+  let html = "";
   try {
     const execPath = await chromium.executablePath();
     browser = await puppeteer.launch({
@@ -168,32 +187,58 @@ module.exports = async (req, res) => {
       headless: chromium.headless
     });
     const page = await browser.newPage();
-
-    // Load page quickly
+    // Set a larger viewport so more of the page is in view.
+    await page.setViewport({ width: 1440, height: 2000 });
+    
+    // Load the page using domcontentloaded.
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    // Wait 1 second to allow lazy-loading scripts to run
+    debugData.initialLoadTime = Date.now() - overallStart;
+    
+    // Remove the "loading" attribute to force immediate loading.
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll('img')).forEach(img => {
+        img.removeAttribute('loading');
+      });
+    });
+    
+    // Force lazy-load updates once before scrolling.
+    await page.evaluate(() => {
+      const imgs = Array.from(document.querySelectorAll('img'));
+      imgs.forEach(img => {
+        const currentSrc = img.getAttribute('src') || "";
+        if (!currentSrc || currentSrc.trim() === "" || currentSrc === "about:blank" || currentSrc.includes("s_1x2.gif")) {
+          if (img.dataset) {
+            if (img.dataset.src) { img.src = img.dataset.src; }
+            else if (img.dataset.lazy) { img.src = img.dataset.lazy; }
+            else if (img.dataset.original) { img.src = img.dataset.original; }
+          }
+        }
+      });
+    });
+    
+    // Wait 1 second for initial lazy loads.
     await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Execute smart full-page scroll (with a max of 10 seconds)
-    await withTimeout(smartScroll(page, { maxTimeMS: 10000, stableIterations: 2 }), 11000);
-
-    // Extra wait for any final lazy load updates (1 second)
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
+    
+    // Execute smart scrolling with our loop.
+    await withTimeout(smartScroll(page, { maxTimeMS: 15000, stableIterations: 3 }), 16000);
+    debugData.scrollTime = Date.now() - overallStart;
+    
+    // Wait until (most) images report as loaded.
+    await waitForImagesLoad(page, { timeoutMS: 5000, minLoadedPercent: 0.8, checkInterval: 500 });
+    debugData.imageWaitTime = Date.now() - overallStart;
+    
+    // Capture the final HTML.
     html = await page.content();
+    debugData.finalLoadTime = Date.now() - overallStart;
+    
     await browser.close();
     browser = null;
   } catch (err) {
     console.error("Error scraping with Puppeteer:", err);
     if (browser) await browser.close();
-    res.status(500).json({
-      error: "There was a problem analyzing the URL. Please check the URL and try again."
-    });
-    return;
+    return res.status(500).json({ error: "There was a problem analyzing the URL. Please check the URL and try again." });
   }
   
-  let result;
   try {
     const $ = cheerio.load(html);
     const images = [];
@@ -209,6 +254,8 @@ module.exports = async (req, res) => {
         images.push({ src: finalSrc, alt, $el: $(el) });
       }
     });
+    
+    debugData.imagesFound = images.length;
     
     const errorGroups = {
       "Missing Alt Text": [],
@@ -242,7 +289,7 @@ module.exports = async (req, res) => {
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
-    result = {
+    const result = {
       totalImages: images.length,
       errorGroups
     };
@@ -250,15 +297,14 @@ module.exports = async (req, res) => {
     if (debug) {
       result.debug = {
         processingTime: Date.now() - overallStart,
-        htmlLength: html.length
+        htmlLength: html.length,
+        debugData
       };
     }
     
-    res.status(200).json(result);
+    return res.status(200).json(result);
   } catch (parseError) {
     console.error("Error parsing HTML:", parseError);
-    res.status(500).json({
-      error: "Error processing the page content. Please try again."
-    });
+    return res.status(500).json({ error: "Error processing the page content. Please try again." });
   }
 };
