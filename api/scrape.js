@@ -58,7 +58,7 @@ function collectWordsAfter($, $img, maxWords) {
   return words.slice(0, maxWords);
 }
 
-// Combine before and after text for the image element
+// Combine before and after text for the <img> element
 function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
@@ -75,22 +75,18 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// Limited auto-scroll: Scroll the page a fixed number of times or until a timeout is reached.
-async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 500, timeoutMS = 25000) {
-  return Promise.race([
-    (async () => {
-      let scrolls = 0;
-      while (scrolls < maxScrolls) {
-        const previousHeight = await page.evaluate(() => document.body.scrollHeight);
-        await page.evaluate(y => window.scrollBy(0, y), distance);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        const newHeight = await page.evaluate(() => document.body.scrollHeight);
-        if (newHeight === previousHeight) break;
-        scrolls++;
-      }
-    })(),
-    new Promise(resolve => setTimeout(resolve, timeoutMS))
-  ]);
+// Limited auto-scroll: Scroll up to maxScrolls or for a maximum duration (maxTimeMS)
+async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 300, maxTimeMS = 20000) {
+  const startTime = Date.now();
+  let scrolls = 0;
+  while (scrolls < maxScrolls && (Date.now() - startTime) < maxTimeMS) {
+    const previousHeight = await page.evaluate(() => document.body.scrollHeight);
+    await page.evaluate(y => window.scrollBy(0, y), distance);
+    await new Promise(resolve => setTimeout(resolve, delay));
+    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+    if (newHeight === previousHeight) break;
+    scrolls++;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -131,12 +127,12 @@ module.exports = async (req, res) => {
     });
 
     const page = await browser.newPage();
-    // Use a reasonably strict timeout and wait until network activities subside
+    // Use networkidle2 to wait for most network activity to subside
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     
-    // For very heavy pages (like eBay), limit scrolling more aggressively:
+    // Limit scrolling: For known heavy sites, you can reduce maxScrolls
     const maxScrolls = url.includes("ebay.com") ? 3 : 10;
-    await autoScroll(page, maxScrolls, 500, 500, 25000);
+    await autoScroll(page, maxScrolls, 500, 300, 20000);
     
     const html = await page.content();
     await browser.close();
@@ -148,7 +144,7 @@ module.exports = async (req, res) => {
       const alt = ($(el).attr('alt') || '').trim();
       const rawSrc = $(el).attr('src') || '';
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Optionally, filter out tracking pixels (example):
+      // Optionally, filter out known tracking pixels
       if (finalSrc.includes("bat.bing.com/action/0")) return;
       images.push({ src: finalSrc, alt, $el: $(el) });
     });
@@ -162,19 +158,19 @@ module.exports = async (req, res) => {
 
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) Missing alt text
+      // 1) If missing alt text, flag as error
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) Check if alt text is just a file name
+      // 2) Check if alt text is simply the file name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 3) Check if alt text duplicates nearby text
+      // 3) Check if the alt text duplicates nearby content
       const localText = getNearbyText($, img.$el, 300, 300);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
@@ -185,7 +181,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise, mark for manual check
+      // 4) Otherwise, mark for manual review
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
 
