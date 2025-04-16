@@ -4,7 +4,7 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// Utility: Highlight a snippet with the matching alt text
+// Utility: Highlight a snippet in the text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -20,7 +20,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// Collect words before an element (up to maxWords)
+// Collect words before the <img> element (up to maxWords)
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -39,7 +39,7 @@ function collectWordsBefore($, $img, maxWords) {
   return words.slice(-maxWords);
 }
 
-// Collect words after an element (up to maxWords)
+// Collect words after the <img> element (up to maxWords)
 function collectWordsAfter($, $img, maxWords) {
   const words = [];
   let $current = $img.next();
@@ -58,14 +58,14 @@ function collectWordsAfter($, $img, maxWords) {
   return words.slice(0, maxWords);
 }
 
-// Combine before and after text for the element
+// Combine before and after text for the <img>
 function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
   return [...before, ...after].join(" ");
 }
 
-// Convert a relative URL to an absolute URL, based on baseUrl
+// Convert a relative URL to an absolute URL based on baseUrl
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -75,13 +75,14 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// Limited auto-scroll: Scroll a fixed number of times to reduce execution time.
+// Limited auto-scroll: Scroll a fixed number of times to avoid infinite scrolling
 async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 500) {
   let scrolls = 0;
   while (scrolls < maxScrolls) {
     const previousHeight = await page.evaluate(() => document.body.scrollHeight);
     await page.evaluate((y) => window.scrollBy(0, y), distance);
-    await page.waitForTimeout(delay);
+    // Instead of page.waitForTimeout, use a native promise with setTimeout:
+    await new Promise(resolve => setTimeout(resolve, delay));
     const newHeight = await page.evaluate(() => document.body.scrollHeight);
     if (newHeight === previousHeight) break;
     scrolls++;
@@ -127,7 +128,7 @@ module.exports = async (req, res) => {
 
     const page = await browser.newPage();
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    await autoScroll(page, 10, 500, 500); // Limited scrolling
+    await autoScroll(page, 10, 500, 500);
     const html = await page.content();
     await browser.close();
     browser = null;
@@ -150,12 +151,12 @@ module.exports = async (req, res) => {
 
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) Missing alt?
+      // 1) Check for missing alt text
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) Check if alt text is a file name
+      // 2) Check if alt text is simply a file name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
@@ -173,7 +174,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise flag for manual check
+      // 4) Otherwise require manual check
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
 
