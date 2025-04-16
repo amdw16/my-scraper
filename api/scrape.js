@@ -3,10 +3,8 @@
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
-const fetch = require('node-fetch'); // For static fetch
 
-// ==========================================================
-// Utility: Highlight a snippet in text matching the alt text
+// Utility: Create a highlighted snippet from text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -22,8 +20,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// ==========================================================
-// Functions to collect nearby text for an <img>
+// Functions to extract nearby text around an <img>
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -41,7 +38,6 @@ function collectWordsBefore($, $img, maxWords) {
   }
   return words.slice(-maxWords);
 }
-
 function collectWordsAfter($, $img, maxWords) {
   const words = [];
   let $current = $img.next();
@@ -59,15 +55,13 @@ function collectWordsAfter($, $img, maxWords) {
   }
   return words.slice(0, maxWords);
 }
-
 function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
   return [...before, ...after].join(" ");
 }
 
-// ==========================================================
-// Helper: Convert a relative URL to an absolute URL based on baseUrl
+// Helper: Convert a URL (relative/absolute) to absolute based on baseUrl
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -77,15 +71,13 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// ==========================================================
-// Limited auto-scroll for Puppeteer with time-based cutoff
+// Limited auto-scroll: Scroll up to maxScrolls or for a maximum duration (maxTimeMS)
 async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 300, maxTimeMS = 20000) {
   const startTime = Date.now();
   let scrolls = 0;
   while (scrolls < maxScrolls && (Date.now() - startTime) < maxTimeMS) {
     const previousHeight = await page.evaluate(() => document.body.scrollHeight);
     await page.evaluate(y => window.scrollBy(0, y), distance);
-    // Use a native promise as a delay
     await new Promise(resolve => setTimeout(resolve, delay));
     const newHeight = await page.evaluate(() => document.body.scrollHeight);
     if (newHeight === previousHeight) break;
@@ -93,25 +85,6 @@ async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 300, ma
   }
 }
 
-// ==========================================================
-// Attempt a static fetch (faster for mostly static sites)
-async function fetchStaticHTML(url, timeout = 5000) {
-  return Promise.race([
-    fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'text/html,application/xhtml+xml,application/xml'
-      }
-    }).then(res => { 
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.text(); 
-    }),
-    new Promise((_, reject) => setTimeout(() => reject(new Error("Static fetch timeout")), timeout))
-  ]);
-}
-
-// ==========================================================
-// MAIN FUNCTION
 module.exports = async (req, res) => {
   // BEGIN CORS HEADERS
   const allowedOrigins = [
@@ -127,7 +100,7 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
   // END CORS HEADERS
-  
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
@@ -139,62 +112,55 @@ module.exports = async (req, res) => {
   if (!/^https?:\/\//i.test(url)) {
     url = 'https://' + url;
   }
-
-  let html = "";
-  let usingPuppeteer = false;
-  
-  // First, try static fetch for speed
-  try {
-    html = await fetchStaticHTML(url, 5000); // 5-second timeout
-    const $temp = cheerio.load(html);
-    const staticImgCount = $temp('img').length;
-    // If we got a reasonable number of images (e.g., 5 or more), use static HTML.
-    if (staticImgCount < 5) {
-      throw new Error("Not enough images in static fetch, falling back to Puppeteer");
-    }
-  } catch (err) {
-    // Fall back to Puppeteer for dynamic sites
-    usingPuppeteer = true;
-  }
   
   let browser = null;
-  if (usingPuppeteer || !html) {
-    try {
-      const execPath = await chromium.executablePath();
-      browser = await puppeteer.launch({
-        args: chromium.args,
-        executablePath: execPath,
-        headless: chromium.headless
-      });
-      const page = await browser.newPage();
-      // Use a lighter event for faster resolution; networkidle2 might be too strict
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      // For known heavy sites (e.g., ebay), reduce the number of scrolls
-      const maxScrolls = url.includes("ebay.com") ? 3 : 10;
-      await autoScroll(page, maxScrolls, 500, 300, 20000);
-      html = await page.content();
-      await browser.close();
-      browser = null;
-    } catch (err) {
-      if (browser) await browser.close();
-      console.error("Error in Puppeteer fallback:", err);
-      return res.status(500).json({
-        error: "There was a problem analyzing the URL. Please try again or check the URL formatting."
-      });
-    }
+  let html = "";
+  try {
+    const execPath = await chromium.executablePath();
+    browser = await puppeteer.launch({
+      args: chromium.args,
+      executablePath: execPath,
+      headless: chromium.headless
+    });
+    const page = await browser.newPage();
+    // Use networkidle2 for initial load (adjust if needed)
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    
+    // Limit scrolling—reduce further for heavy sites (e.g., ebay)
+    const maxScrolls = url.includes("ebay.com") ? 3 : 10;
+    await autoScroll(page, maxScrolls, 500, 300, 20000);
+    
+    // Wait one additional second to allow lazy-loaded images to update
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    html = await page.content();
+    await browser.close();
+    browser = null;
+  } catch (err) {
+    console.error("Error scraping with Puppeteer:", err);
+    if (browser) await browser.close();
+    return res.status(500).json({
+      error: "There was a problem analyzing the URL. Check for typos and formatting in the URL and try again."
+    });
   }
   
-  // Parse the collected HTML with Cheerio
   try {
     const $ = cheerio.load(html);
     const images = [];
     $('img').each((_, el) => {
+      // Try to get a valid src; if empty, look at common lazy-loading attributes
+      let rawSrc = $(el).attr('src') || '';
+      if (!rawSrc || rawSrc.trim() === "" || rawSrc === "about:blank") {
+        rawSrc = $(el).attr('data-src') || $(el).attr('data-lazy') || $(el).attr('data-original') || '';
+      }
       const alt = ($(el).attr('alt') || '').trim();
-      const rawSrc = $(el).attr('src') || '';
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Optionally filter out tracking pixels
+      // Filter out known tracking/placeholder images if desired
       if (finalSrc.includes("bat.bing.com/action/0")) return;
-      images.push({ src: finalSrc, alt, $el: $(el) });
+      // Only add if finalSrc isn't empty
+      if (finalSrc) {
+        images.push({ src: finalSrc, alt, $el: $(el) });
+      }
     });
     
     const errorGroups = {
@@ -206,16 +172,19 @@ module.exports = async (req, res) => {
     
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
+      // 1) If missing alt text:
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
+      // 2) If alt text is simply the file name:
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
+      // 3) If alt text appears in the nearby content:
       const localText = getNearbyText($, img.$el, 300, 300);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
@@ -226,6 +195,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
+      // 4) Otherwise, mark for manual check:
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
