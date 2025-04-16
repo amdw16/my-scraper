@@ -11,7 +11,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const idx = fullLower.indexOf(matchLower);
   if (idx === -1) return "";
   const start = Math.max(0, idx - radius);
-  const end = Math.min(fullLower.length, idx + matchStr.length + radius);
+  const end = Math.min(fullText.length, idx + matchStr.length + radius);
   let snippet = fullText.slice(start, end);
   const altRegex = new RegExp(matchStr, "i");
   snippet = snippet.replace(altRegex, `**${matchStr}**`);
@@ -67,7 +67,7 @@ function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   return [...before, ...after].join(" ");
 }
 
-// Helper: convert a relative URL to absolute
+// Helper: convert a relative URL to an absolute URL
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -77,7 +77,7 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// autoScroll: scroll so lazy-loaded images appear
+// autoScroll: scroll the page so that lazy-loaded images appear
 async function autoScroll(page) {
   await page.evaluate(async () => {
     await new Promise((resolve) => {
@@ -112,24 +112,26 @@ module.exports = async (req, res) => {
   if (req.method === "OPTIONS") return res.status(200).end();
   // END CORS HEADERS
 
-  if (req.method !== 'POST')
+  if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+  }
 
   let { url } = req.body || {};
-  if (!url)
+  if (!url) {
     return res.status(400).json({ error: 'Missing "url" in request body.' });
+  }
   if (!/^https?:\/\//i.test(url)) {
     url = 'https://' + url;
   }
 
   let browser = null;
   try {
-    // Use PUPPETEER_EXECUTABLE_PATH env var if set; otherwise, fall back.
-    const execPath = process.env.PUPPETEER_EXECUTABLE_PATH || await chromium.executablePath();
+    // Directly use chromium.executablePath() to locate the Chromium binary.
+    const execPath = await chromium.executablePath();
     browser = await puppeteer.launch({
       args: chromium.args,
       executablePath: execPath,
-      headless: chromium.headless,
+      headless: chromium.headless
     });
 
     const page = await browser.newPage();
@@ -157,19 +159,19 @@ module.exports = async (req, res) => {
 
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // Missing alt?
+      // 1) Check if alt is missing
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // File name check
+      // 2) Check if alt text is the same as the file name or is just a file name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // Matching Nearby Content check
+      // 3) Check if alt text duplicates nearby content
       const localText = getNearbyText($, img.$el, 300, 300);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
@@ -180,7 +182,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // Fallback: Manual Check
+      // 4) Otherwise, require a manual check
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
 
