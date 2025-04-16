@@ -1,11 +1,9 @@
-// api/scrape.js
-
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// ------------------------------
-// Utility: Create a highlighted snippet for later use
+// -------------------------------------------------------
+// Utility: Create a highlighted snippet in text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -21,7 +19,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// ------------------------------
+// -------------------------------------------------------
 // Functions to collect nearby text around an <img>
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
@@ -61,8 +59,8 @@ function getNearbyText($, $img, wordsBefore = 500, wordsAfter = 500) {
   return [...before, ...after].join(" ");
 }
 
-// ------------------------------
-// Helper: Convert relative URL to absolute URL
+// -------------------------------------------------------
+// Helper: Convert a (relative) URL to an absolute URL
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -72,22 +70,19 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// ------------------------------
-// Smart full-page scroll function.
-// It scrolls by one viewport height repeatedly, forcing lazy-loaded images
-// to update. It stops when either (a) the document height does not increase,
-// and the number of <img> tags is stable for N iterations, or (b) when a maximum time is reached.
-async function smartScroll(page, { maxTimeMS = 25000, stableCountThreshold = 3 } = {}) {
+// -------------------------------------------------------
+// Smart scrolling: scrolls by one viewport until image count stabilizes
+// or until a maximum time limit is reached.
+async function smartScroll(page, { maxTimeMS = 10000, stableIterations = 2 } = {}) {
   const startTime = Date.now();
-  let prevImageCount = 0, stableCount = 0;
-
-  while ((Date.now() - startTime) < maxTimeMS && stableCount < stableCountThreshold) {
-    // Force lazy-loading update for all images on each iteration:
+  let prevImageCount = await page.evaluate(() => document.querySelectorAll('img').length);
+  let stableCount = 0;
+  
+  while (Date.now() - startTime < maxTimeMS && stableCount < stableIterations) {
+    // Force lazy-loading update.
     await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      imgs.forEach(img => {
+      Array.from(document.querySelectorAll('img')).forEach(img => {
         const currentSrc = img.getAttribute('src') || "";
-        // Check for empty or typical placeholder patterns
         if (!currentSrc || currentSrc.trim() === "" || currentSrc === "about:blank" || currentSrc.includes("s_1x2.gif")) {
           if (img.dataset) {
             if (img.dataset.src) {
@@ -101,13 +96,12 @@ async function smartScroll(page, { maxTimeMS = 25000, stableCountThreshold = 3 }
         }
       });
     });
-
-    // Scroll by one viewport height
+    
+    // Scroll by one viewport height.
     await page.evaluate(() => window.scrollBy(0, window.innerHeight));
-    // Wait for 500ms to allow new images to load
+    // Wait briefly for new images to load.
     await new Promise(resolve => setTimeout(resolve, 500));
-
-    // Check how many images are now on the page
+    
     const currentImageCount = await page.evaluate(() => document.querySelectorAll('img').length);
     if (currentImageCount === prevImageCount) {
       stableCount++;
@@ -118,13 +112,24 @@ async function smartScroll(page, { maxTimeMS = 25000, stableCountThreshold = 3 }
   }
 }
 
-// ------------------------------
+// -------------------------------------------------------
+// Timeout wrapper: ensures a response even if scraping takes too long.
+async function withTimeout(promise, timeoutMS = 28000) {
+  let timeout;
+  const timeoutPromise = new Promise((resolve, reject) => {
+    timeout = setTimeout(() => {
+      resolve({ timeout: true });
+    }, timeoutMS);
+  });
+  const result = await Promise.race([promise, timeoutPromise]);
+  clearTimeout(timeout);
+  return result;
+}
+
+// -------------------------------------------------------
 // MAIN FUNCTION
 module.exports = async (req, res) => {
-  const debugData = {};
-  const startTime = Date.now();
-
-  // Set CORS headers
+  // Always set CORS headers (even on errors)
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -136,14 +141,14 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", allowedOrigins.includes(origin) ? origin : "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
-
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
-  
+
   let { url, debug } = req.body || {};
-  // Accept debug flag via query as well.
   debug = debug || req.query.debug;
   
   if (!url) {
@@ -153,8 +158,8 @@ module.exports = async (req, res) => {
     url = 'https://' + url;
   }
   
-  let browser = null;
-  let html = "";
+  const overallStart = Date.now();
+  let browser = null, html = "";
   try {
     const execPath = await chromium.executablePath();
     browser = await puppeteer.launch({
@@ -164,52 +169,46 @@ module.exports = async (req, res) => {
     });
     const page = await browser.newPage();
 
-    // Use a fast load event.
+    // Load page quickly
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    debugData.initialLoadTime = Date.now() - startTime;
 
-    // Wait 1 second to allow lazy-load scripts to update images.
+    // Wait 1 second to allow lazy-loading scripts to run
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Perform full-page scroll to load all images.
-    await smartScroll(page);
-    debugData.scrollTime = Date.now() - startTime;
+    // Execute smart full-page scroll (with a max of 10 seconds)
+    await withTimeout(smartScroll(page, { maxTimeMS: 10000, stableIterations: 2 }), 11000);
 
-    // Extra wait to ensure any triggered lazy loads finish.
+    // Extra wait for any final lazy load updates (1 second)
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     html = await page.content();
-    debugData.finalLoadTime = Date.now() - startTime;
     await browser.close();
     browser = null;
   } catch (err) {
     console.error("Error scraping with Puppeteer:", err);
     if (browser) await browser.close();
-    return res.status(500).json({
+    res.status(500).json({
       error: "There was a problem analyzing the URL. Please check the URL and try again."
     });
+    return;
   }
   
+  let result;
   try {
     const $ = cheerio.load(html);
     const images = [];
-    
     $('img').each((_, el) => {
-      // Retrieve the src; if empty, try common lazy-loading attributes.
       let rawSrc = $(el).attr('src') || '';
       if (!rawSrc || rawSrc.trim() === "" || rawSrc === "about:blank") {
         rawSrc = $(el).attr('data-src') || $(el).attr('data-lazy') || $(el).attr('data-original') || '';
       }
       const alt = ($(el).attr('alt') || '').trim();
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Filter out known tracking pixels if needed.
       if (finalSrc.includes("bat.bing.com/action/0")) return;
       if (finalSrc) {
         images.push({ src: finalSrc, alt, $el: $(el) });
       }
     });
-    
-    debugData.imagesFound = images.length;
     
     const errorGroups = {
       "Missing Alt Text": [],
@@ -220,19 +219,16 @@ module.exports = async (req, res) => {
     
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // (1) Missing alt text.
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // (2) Alt text is just the filename.
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // (3) If alt text appears in nearby text.
       const localText = getNearbyText($, img.$el, 500, 500);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
@@ -243,28 +239,25 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // (4) Otherwise, flag for manual check.
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
-    const result = {
+    result = {
       totalImages: images.length,
       errorGroups
     };
     
     if (debug) {
       result.debug = {
-        processingTime: Date.now() - startTime,
-        htmlLength: html.length,
-        debugData
+        processingTime: Date.now() - overallStart,
+        htmlLength: html.length
       };
     }
     
-    return res.status(200).json(result);
-    
+    res.status(200).json(result);
   } catch (parseError) {
     console.error("Error parsing HTML:", parseError);
-    return res.status(500).json({
+    res.status(500).json({
       error: "Error processing the page content. Please try again."
     });
   }
