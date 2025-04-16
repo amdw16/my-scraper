@@ -4,7 +4,7 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// Utility: Create a highlighted snippet from text
+// Utility: Highlight a snippet in text that matches the alt text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -20,7 +20,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// Functions to extract nearby text around an <img>
+// Functions to collect nearby text for an <img>
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -38,6 +38,7 @@ function collectWordsBefore($, $img, maxWords) {
   }
   return words.slice(-maxWords);
 }
+
 function collectWordsAfter($, $img, maxWords) {
   const words = [];
   let $current = $img.next();
@@ -55,13 +56,14 @@ function collectWordsAfter($, $img, maxWords) {
   }
   return words.slice(0, maxWords);
 }
+
 function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
   return [...before, ...after].join(" ");
 }
 
-// Helper: Convert a URL (relative/absolute) to absolute based on baseUrl
+// Helper: Convert a relative URL to an absolute URL
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -71,20 +73,7 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// Limited auto-scroll: Scroll up to maxScrolls or for a maximum duration (maxTimeMS)
-async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 300, maxTimeMS = 20000) {
-  const startTime = Date.now();
-  let scrolls = 0;
-  while (scrolls < maxScrolls && (Date.now() - startTime) < maxTimeMS) {
-    const previousHeight = await page.evaluate(() => document.body.scrollHeight);
-    await page.evaluate(y => window.scrollBy(0, y), distance);
-    await new Promise(resolve => setTimeout(resolve, delay));
-    const newHeight = await page.evaluate(() => document.body.scrollHeight);
-    if (newHeight === previousHeight) break;
-    scrolls++;
-  }
-}
-
+// Main Function
 module.exports = async (req, res) => {
   // BEGIN CORS HEADERS
   const allowedOrigins = [
@@ -123,15 +112,11 @@ module.exports = async (req, res) => {
       headless: chromium.headless
     });
     const page = await browser.newPage();
-    // Use networkidle2 for initial load (adjust if needed)
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    // Use a faster loading strategy: waitUntil domcontentloaded
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     
-    // Limit scrolling—reduce further for heavy sites (e.g., ebay)
-    const maxScrolls = url.includes("ebay.com") ? 3 : 10;
-    await autoScroll(page, maxScrolls, 500, 300, 20000);
-    
-    // Wait one additional second to allow lazy-loaded images to update
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Wait one extra second for lazy images to update (minimal wait)
+    await page.waitForTimeout(1000);
     
     html = await page.content();
     await browser.close();
@@ -148,16 +133,15 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const images = [];
     $('img').each((_, el) => {
-      // Try to get a valid src; if empty, look at common lazy-loading attributes
+      // Try to get the standard src; if empty, check common lazy-loading attributes
       let rawSrc = $(el).attr('src') || '';
       if (!rawSrc || rawSrc.trim() === "" || rawSrc === "about:blank") {
         rawSrc = $(el).attr('data-src') || $(el).attr('data-lazy') || $(el).attr('data-original') || '';
       }
       const alt = ($(el).attr('alt') || '').trim();
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Filter out known tracking/placeholder images if desired
+      // Filter out known tracking pixels (example)
       if (finalSrc.includes("bat.bing.com/action/0")) return;
-      // Only add if finalSrc isn't empty
       if (finalSrc) {
         images.push({ src: finalSrc, alt, $el: $(el) });
       }
@@ -172,19 +156,19 @@ module.exports = async (req, res) => {
     
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) If missing alt text:
+      // 1) If missing alt text
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) If alt text is simply the file name:
+      // 2) If alt text is just a file name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 3) If alt text appears in the nearby content:
+      // 3) If alt text appears in the nearby content
       const localText = getNearbyText($, img.$el, 300, 300);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
@@ -195,7 +179,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise, mark for manual check:
+      // 4) Otherwise, mark for manual review
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
