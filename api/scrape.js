@@ -4,9 +4,8 @@ const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio = require('cheerio');
 
-// ------------------------------
-// Utility: Create a highlighted snippet in text 
-// (used for nearby content checking)
+// ------------------------------------------
+// Utility: Create a highlighted snippet in text
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -22,8 +21,8 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   return snippet;
 }
 
-// ------------------------------
-// Functions to collect nearby text around an <img>
+// ------------------------------------------
+// Functions to extract nearby text around an <img>
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -66,8 +65,8 @@ function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
   return [...before, ...after].join(" ");
 }
 
-// ------------------------------
-// Helper: Convert a (relative) URL to an absolute URL based on baseUrl
+// ------------------------------------------
+// Helper: Convert a (relative) URL to an absolute URL based on baseUrl.
 function toAbsoluteUrl(src, baseUrl) {
   if (!src) return "";
   try {
@@ -77,10 +76,25 @@ function toAbsoluteUrl(src, baseUrl) {
   }
 }
 
-// ------------------------------
+// ------------------------------------------
+// (Optional) Limited auto-scroll function (currently NOT used for heavy domains)
+async function autoScroll(page, maxScrolls = 10, distance = 500, delay = 300, maxTimeMS = 20000) {
+  const startTime = Date.now();
+  let scrolls = 0;
+  while (scrolls < maxScrolls && (Date.now() - startTime) < maxTimeMS) {
+    const previousHeight = await page.evaluate(() => document.body.scrollHeight);
+    await page.evaluate(y => window.scrollBy(0, y), distance);
+    await new Promise(resolve => setTimeout(resolve, delay));
+    const newHeight = await page.evaluate(() => document.body.scrollHeight);
+    if (newHeight === previousHeight) break;
+    scrolls++;
+  }
+}
+
+// ------------------------------------------
 // MAIN FUNCTION
 module.exports = async (req, res) => {
-  // Set CORS headers
+  // BEGIN CORS HEADERS
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -93,6 +107,7 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
+  // END CORS HEADERS
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
@@ -116,32 +131,20 @@ module.exports = async (req, res) => {
       headless: chromium.headless
     });
     const page = await browser.newPage();
-    // Use a fast load event for speed (domcontentloaded)
+    
+    // Use domcontentloaded for faster load instead of waiting for networkidle2.
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     
-    // Wait 1 second to give lazy-load scripts a chance to run
+    // Wait 1 second to give lazy-loading scripts a chance to update image srcs.
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    // Force lazy-loading: if images have common lazy-load attributes, set src.
-    await page.evaluate(() => {
-      const imgs = Array.from(document.querySelectorAll('img'));
-      imgs.forEach(img => {
-        const currentSrc = img.getAttribute('src') || "";
-        if (!currentSrc || currentSrc.trim() === "" || currentSrc.includes("s_1x2.gif")) {
-          if (img.dataset) {
-            if (img.dataset.src) {
-              img.src = img.dataset.src;
-            } else if (img.dataset.lazy) {
-              img.src = img.dataset.lazy;
-            } else if (img.dataset.original) {
-              img.src = img.dataset.original;
-            }
-          }
-        }
-      });
-    });
+    // [Optional] If you want to scroll only if needed, you can enable the autoScroll here
+    // For heavy pages like eBay or HillhouseHome, we disable scrolling.
+    const shouldScroll = !(url.includes("ebay.com") || url.includes("hillhousehome.com"));
+    if (shouldScroll) {
+      await autoScroll(page, 10, 500, 300, 20000);
+    }
     
-    // Retrieve the final HTML
     html = await page.content();
     await browser.close();
     browser = null;
@@ -157,14 +160,14 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const images = [];
     $('img').each((_, el) => {
-      // Get the src; if missing, check common lazy-loading attributes
+      // Try standard src attribute; if missing or empty, check common lazy-loading attributes.
       let rawSrc = $(el).attr('src') || '';
       if (!rawSrc || rawSrc.trim() === "" || rawSrc === "about:blank") {
         rawSrc = $(el).attr('data-src') || $(el).attr('data-lazy') || $(el).attr('data-original') || '';
       }
       const alt = ($(el).attr('alt') || '').trim();
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Optionally filter out known tracking pixels (for example)
+      // Filter out known tracking pixels if desired.
       if (finalSrc.includes("bat.bing.com/action/0")) return;
       if (finalSrc) {
         images.push({ src: finalSrc, alt, $el: $(el) });
@@ -180,19 +183,19 @@ module.exports = async (req, res) => {
     
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) If the alt text is missing
+      // 1) Missing alt text check.
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) If alt text is basically the file name
+      // 2) File name check.
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 3) If the alt text is duplicated in nearby text content
+      // 3) Check if alt text appears in the nearby content.
       const localText = getNearbyText($, img.$el, 300, 300);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
@@ -203,7 +206,7 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise, mark for manual review
+      // 4) Otherwise, flag for manual check.
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
