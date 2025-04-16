@@ -1,7 +1,9 @@
 {
   "functions": {
     "api/scrape.js": {
-      "includeFiles": "node_modules/@sparticuz/chromium/**/*"
+      "includeFiles": "node_modules/@sparticuz/chromium/**/*",
+      "memory": 1024,
+      "maxDuration": 30
     }
   }
 }
