@@ -10,9 +10,14 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+<<<<<<< HEAD
     "@sparticuz/chromium": "^133.0.0",
     "cheerio": "1.0.0",
     "node-fetch": "2.7.0",
     "puppeteer-core": "^24.6.1"
+=======
+    "cheerio": "1.0.0",
+    "node-fetch": "2.7.0"
+>>>>>>> 1978e179f8a60402a1ab39e8ec7016366eeeff71
   }
 }
