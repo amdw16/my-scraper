@@ -6,7 +6,7 @@ const cheerio = require('cheerio');
 
 // ------------------------------
 // Utility: Create a highlighted snippet in text 
-// (used for nearby content checking)
+// (used for matching nearby content checking)
 function createHighlightedSnippet(fullText, matchStr, radius = 50) {
   const lowerText = fullText.toLowerCase();
   const lowerMatch = matchStr.toLowerCase();
@@ -23,7 +23,7 @@ function createHighlightedSnippet(fullText, matchStr, radius = 50) {
 }
 
 // ------------------------------
-// Functions to collect nearby text around an <img>
+// Functions to collect nearby text for an <img>
 function collectWordsBefore($, $img, maxWords) {
   const words = [];
   let $current = $img.prev();
@@ -60,7 +60,7 @@ function collectWordsAfter($, $img, maxWords) {
   return words.slice(0, maxWords);
 }
 
-function getNearbyText($, $img, wordsBefore = 300, wordsAfter = 300) {
+function getNearbyText($, $img, wordsBefore = 500, wordsAfter = 500) {
   const before = collectWordsBefore($, $img, wordsBefore);
   const after = collectWordsAfter($, $img, wordsAfter);
   return [...before, ...after].join(" ");
@@ -80,7 +80,9 @@ function toAbsoluteUrl(src, baseUrl) {
 // ------------------------------
 // MAIN FUNCTION
 module.exports = async (req, res) => {
-  // Set CORS headers
+  const startTime = Date.now(); // For debugging
+
+  // BEGIN CORS HEADERS
   const allowedOrigins = [
     "https://scribely-v2.webflow.io",
     "https://scribely.com",
@@ -93,12 +95,16 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
+  // END CORS HEADERS
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
 
-  let { url } = req.body || {};
+  let { url, debug } = req.body || {};
+  // Allow debug flag via query as well
+  debug = debug || req.query.debug;
+
   if (!url) {
     return res.status(400).json({ error: 'Missing "url" in request body.' });
   }
@@ -116,13 +122,13 @@ module.exports = async (req, res) => {
       headless: chromium.headless
     });
     const page = await browser.newPage();
-    // Use a fast load event for speed (domcontentloaded)
+    // Load the page quickly with the domcontentloaded event
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     
-    // Wait 1 second to give lazy-load scripts a chance to run
+    // Wait 1 second to allow lazy-load scripts to run and update image srcs
     await new Promise(resolve => setTimeout(resolve, 1000));
     
-    // Force lazy-loading: if images have common lazy-load attributes, set src.
+    // Execute a script to force lazy-loaded images (check common data attributes)
     await page.evaluate(() => {
       const imgs = Array.from(document.querySelectorAll('img'));
       imgs.forEach(img => {
@@ -157,14 +163,13 @@ module.exports = async (req, res) => {
     const $ = cheerio.load(html);
     const images = [];
     $('img').each((_, el) => {
-      // Get the src; if missing, check common lazy-loading attributes
       let rawSrc = $(el).attr('src') || '';
       if (!rawSrc || rawSrc.trim() === "" || rawSrc === "about:blank") {
         rawSrc = $(el).attr('data-src') || $(el).attr('data-lazy') || $(el).attr('data-original') || '';
       }
       const alt = ($(el).attr('alt') || '').trim();
       const finalSrc = toAbsoluteUrl(rawSrc, url);
-      // Optionally filter out known tracking pixels (for example)
+      // Optionally filter out tracking pixels
       if (finalSrc.includes("bat.bing.com/action/0")) return;
       if (finalSrc) {
         images.push({ src: finalSrc, alt, $el: $(el) });
@@ -180,20 +185,20 @@ module.exports = async (req, res) => {
     
     images.forEach(img => {
       const altLower = img.alt.toLowerCase();
-      // 1) If the alt text is missing
+      // 1) Missing alt text
       if (!img.alt) {
         errorGroups["Missing Alt Text"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 2) If alt text is basically the file name
+      // 2) Check if alt text is basically the file name
       const srcFileName = img.src.split('/').pop().split('.')[0] || "";
       const extRegex = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
       if (altLower === srcFileName.toLowerCase() || extRegex.test(altLower)) {
         errorGroups["File Name"].push({ src: img.src, alt: img.alt });
         return;
       }
-      // 3) If the alt text is duplicated in nearby text content
-      const localText = getNearbyText($, img.$el, 300, 300);
+      // 3) Check if the alt text appears in the nearby text
+      const localText = getNearbyText($, img.$el, 500, 500);
       if (localText.toLowerCase().includes(altLower)) {
         const snippet = createHighlightedSnippet(localText, img.alt, 50);
         errorGroups["Matching Nearby Content"].push({
@@ -203,14 +208,26 @@ module.exports = async (req, res) => {
         });
         return;
       }
-      // 4) Otherwise, mark for manual review
+      // 4) Otherwise, flag for manual review
       errorGroups["Manual Check"].push({ src: img.src, alt: img.alt });
     });
     
-    return res.status(200).json({
+    // Prepare final result
+    const result = {
       totalImages: images.length,
       errorGroups
-    });
+    };
+
+    // Optionally add debug info
+    if (debug) {
+      result.debug = {
+        processingTime: Date.now() - startTime,
+        htmlLength: html.length,
+        imagesCollected: images.length
+      };
+    }
+    
+    return res.status(200).json(result);
     
   } catch (parseError) {
     console.error("Error parsing HTML:", parseError);
