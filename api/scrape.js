@@ -1,25 +1,20 @@
-// File: api/scrape.js
 /*************************************************************************
- * Scribely Alt‑Text Checker – v11 (with typo/block detection)
+ * Scribely Alt-Text Checker – v12
+ * - Deep-scan option removed
+ * - Nike “data-landscape-url / data-portrait-url” sources supported
+ * - Duplicate-text detection always on
  *************************************************************************/
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio   = require('cheerio');
 const fetch     = require('node-fetch');
 
-// Custom error type for distinguishing failures
-class ScrapeError extends Error {
-  constructor(type) {
-    super(type);
-    this.type = type;
-  }
-}
-
-/*──────── helper utilities ───────*/
+/*────────── helper utilities ─────────*/
 const chooseSrc = g => {
-  const raw = g('data-srcset') || g('srcset') ||
-              g('data-src')    || g('data-lazy') ||
-              g('data-original') || g('src')    || '';
+  const raw = g('data-srcset')     || g('srcset') ||
+              g('data-src')        || g('data-lazy') ||
+              g('data-original')   || g('data-landscape-url') ||
+              g('data-portrait-url') || g('src') || '';
   return raw.split(',')[0].trim().split(' ')[0];
 };
 const bgUrl = s => {
@@ -64,9 +59,7 @@ function bucket(rawList, url) {
 
   rawList.forEach(img => {
     if (!img.src) return;
-    try {
-      img.src = new URL(img.src, url).toString();
-    } catch {}
+    try { img.src = new URL(img.src, url).toString(); } catch {}
     const altLower = img.alt.toLowerCase();
     const baseName = (img.src.split('/').pop() || '').split('.')[0];
     const clean = { src: img.src, alt: img.alt };
@@ -100,18 +93,9 @@ function filter(list) {
 }
 
 /*──────── HTML quick pass ───────*/
-async function scrapeHTML(url, limit, dup) {
-  let resp;
-  try {
-    resp = await fetch(url, { timeout: 6000 });
-  } catch (err) {
-    // Network error, DNS failure, timeout, etc.
-    throw new ScrapeError('blocked');
-  }
-  if (!resp.ok) {
-    // HTTP error status (404, 500, etc.)
-    throw new ScrapeError('typo');
-  }
+async function scrapeHTML(url, limit) {
+  const resp = await fetch(url, { timeout: 6000 });
+  if (!resp.ok) throw new Error('typo');
   const html = await resp.text();
   const $    = cheerio.load(html);
   const raw  = [];
@@ -135,14 +119,13 @@ async function scrapeHTML(url, limit, dup) {
     raw.push({ src: norm(s), alt: a.trim(), tooSmall: too, $el: $e });
   });
 
+  /* duplicate-text detection */
   const clean = filter(raw);
-  if (dup) {
-    clean.forEach(it => {
-      if (it.alt && wordsAround($, it.$el, limit).includes(it.alt.toLowerCase())) {
-        it.dup = true;
-      }
-    });
-  }
+  clean.forEach(it => {
+    if (it.alt && wordsAround($, it.$el, limit).includes(it.alt.toLowerCase())) {
+      it.dup = true;
+    }
+  });
 
   return {
     report:  bucket(clean, url),
@@ -150,8 +133,8 @@ async function scrapeHTML(url, limit, dup) {
   };
 }
 
-/*──────── JS‑DOM detailed pass ───────*/
-async function scrapeDOM(url, limit, dup) {
+/*──────── JS-DOM detailed pass ───────*/
+async function scrapeDOM(url, limit) {
   const exe = await chromium.executablePath();
   async function run({ jsOn, timeout, ua }) {
     const browser = await puppeteer.launch({
@@ -169,6 +152,7 @@ async function scrapeDOM(url, limit, dup) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
 
       if (jsOn) {
+        /* lazy-load scroll */
         let prev = 0;
         for (let i = 0; i < 12; i++) {
           const len = await page.$$eval(
@@ -185,34 +169,37 @@ async function scrapeDOM(url, limit, dup) {
 
       const raw = await page.$$eval(
         ['img','source','[style*="background-image"]'].join(','),
-        (els, dupFlg, lim) => {
+        (els, lim) => {
           return els.map(el => {
             const tag = el.tagName.toLowerCase();
             let s = '', a = '', too = false, dup = false;
             const g = attr => el.getAttribute(attr) || '';
             if (tag === 'img') {
-              s = g('data-srcset')||g('srcset')||
-                  g('data-src')   ||g('data-lazy')||
-                  g('data-original')||g('src')    ||'';
+              s = g('data-srcset') || g('srcset') ||
+                  g('data-src')    || g('data-lazy') ||
+                  g('data-original') || g('data-landscape-url') ||
+                  g('data-portrait-url') || g('src') || '';
               a   = g('alt');
               too = el.width && el.height && (el.width * el.height <= 9);
             } else if (tag === 'source') {
-              s = g('data-srcset')||g('srcset')||'';
+              s = g('data-srcset') || g('srcset') ||
+                  g('data-landscape-url') || g('data-portrait-url') || '';
               a = el.parentElement.querySelector('img')?.alt || '';
             } else {
-              const m = /url\(["']?(.*?)["']?\)/.exec(el.style.backgroundImage||'');
+              const m = /url\\([\"']?(.*?)[\"']?\\)/.exec(el.style.backgroundImage||'');
               s = m ? m[1] : '';
             }
 
-            if (dupFlg && a) {
+            /* duplicate check (always on) */
+            if (a) {
               const grab = dir => {
                 const w = [];
                 let n = el[dir];
                 while (n && w.length < lim) {
                   if (n.nodeType === 3 && n.textContent.trim())
-                    w.push(...n.textContent.trim().split(/\s+/));
+                    w.push(...n.textContent.trim().split(/\\s+/));
                   else if (n.nodeType === 1) {
-                    const t = n.textContent.trim(); if (t) w.push(...t.split(/\s+/));
+                    const t = n.textContent.trim(); if (t) w.push(...t.split(/\\s+/));
                   }
                   n = n[dir];
                 }
@@ -224,9 +211,9 @@ async function scrapeDOM(url, limit, dup) {
                               .join(' ').toLowerCase();
               dup = around.includes(a.toLowerCase());
             }
-            return { src: norm(s), alt: a.trim(), tooSmall: too, dup };
+            return { src: s, alt: a.trim(), tooSmall: too, dup };
           });
-        }, dup, limit
+        }, limit
       );
 
       await browser.close();
@@ -251,14 +238,12 @@ async function scrapeDOM(url, limit, dup) {
   }
 }
 
-/*──────── HTTP handler ─────────*/
+/*──────── HTTP handler ───────*/
 module.exports = async (req, res) => {
   const ok = [
     'https://scribely-v2.webflow.io',
-    'https://scribely.com',
-    'https://www.scribely.com',
-    'https://scribelytribe.com',
-    'https://www.scribelytribe.com'
+    'https://scribely.com', 'https://www.scribely.com',
+    'https://scribelytribe.com', 'https://www.scribelytribe.com'
   ];
   const origin = req.headers.origin || '*';
   res.setHeader('Access-Control-Allow-Origin', ok.includes(origin) ? origin : '*');
@@ -267,15 +252,14 @@ module.exports = async (req, res) => {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST')    return res.status(405).json({ error: 'POST only' });
 
-  let { url, deep } = req.body || {};
+  let { url } = req.body || {};
   if (!url) return res.status(400).json({ error: 'Missing url' });
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  if (!/^https?:\\/\\//i.test(url)) url = 'https://' + url;
 
-  const deepFlag  = deep === 1;
-  const wordLimit = deepFlag ? 300 : 50;
+  const wordLimit = 50;               /* fixed window */
 
   try {
-    const { report: first, metrics } = await scrapeHTML(url, wordLimit, true);
+    const { report: first, metrics } = await scrapeHTML(url, wordLimit);
     const placeholderRatio = 1 - (metrics.kept / (metrics.raw || 1));
     const needDom = placeholderRatio >= 0.8 || first.totalImages < 20;
 
@@ -283,23 +267,23 @@ module.exports = async (req, res) => {
       return res.status(200).json({ ...first, engine: 'html' });
     }
 
-    const domReport = await scrapeDOM(url, wordLimit, deepFlag || first.totalImages <= 400);
+    const domReport = await scrapeDOM(url, wordLimit);
     if (domReport.totalImages < 20) {
       return res.status(200).json({
         ...first,
         engine: 'html',
         blocked: true,
-        note: 'Site blocks headless browsers; only server‑rendered images analysed.'
+        note: 'Site blocks headless browsers; only server-rendered images analysed.'
       });
     }
 
     return res.status(200).json({ ...domReport, engine: 'js-dom' });
 
   } catch (err) {
-    if (err instanceof ScrapeError) {
-      if (err.type === 'typo')    return res.status(400).json({ error: 'typo' });
-      if (err.type === 'blocked') return res.status(403).json({ error: 'blocked' });
-    }
+    if (err.message === 'typo')
+      return res.status(400).json({ error: 'typo' });
+    if (err.message.includes('blocked'))
+      return res.status(403).json({ error: 'blocked' });
     console.error('fatal:', err);
     return res.status(500).json({ error: 'internal' });
   }
