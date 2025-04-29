@@ -14,7 +14,7 @@
     "cheerio": "1.0.0",
     "node-fetch": "2.7.0",
     "puppeteer-core": "^24.6.1",
-    "puppeteer-extra": "^4.3.1",
+    "puppeteer-extra": "^3.4.3",               // ← valid version
     "puppeteer-extra-plugin-stealth": "^2.11.1"
   }
 }
