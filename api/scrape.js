@@ -1,13 +1,13 @@
 /*************************************************************************
- * Scribely Alt-Text Checker – v19-patch  (2025-04-29)
- *  · “Blocked” now means *zero* images instead of “< 20” images
+ * Scribely Alt-Text Checker – v19-patch-B  (2025-04-29)
+ *  · Matching-nearby window = 300 chars before + 300 chars after
  *************************************************************************/
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio   = require('cheerio');
 const fetch     = require('node-fetch');
 
-/* ────────── helpers (unchanged) ────────── */
+/* ────────── helpers ────────── */
 const chooseSrc = g => (
   (g('data-srcset')||g('srcset')||g('data-src')||g('data-lazy')||
    g('data-original')||g('data-landscape-url')||g('data-portrait-url')||
@@ -16,19 +16,24 @@ const bgUrl = s => (s||'').match(/url\(["']?(.*?)["']?\)/i)?.[1] || '';
 const norm  = s => s.replace(/\{width\}x\{height\}/gi,'600x');
 const tiny  = u => /^data:image\/gif;base64,/i.test(u) && u.length < 200;
 
-const wordsAround = ($,$el,N)=>{
-  const grab=dir=>{
-    const out=[]; let cur=$el[dir]();
-    while(cur.length&&out.length<N){
-      const txt=cur[0].type==='text'?cur[0].data:
-               (cur[0].type==='tag'?cur.text():'');
-      if(txt&&txt.trim()) out.push(...txt.trim().split(/\s+/));
-      cur=cur[dir]();
+/* -------- “wordsAround” ➜ “charsAround” (300 + 300) -------- */
+const NEAR_CHARS = 300;                           // chars on EACH side
+
+const charsAround = ($,$el)=>{
+  const collect = (dir,limit)=>{
+    let cur=$el[dir](), out='';
+    while(cur.length && out.length<limit){
+      const txt = cur[0].type==='text' ? cur[0].data :
+                 (cur[0].type==='tag'  ? cur.text()  : '');
+      if(txt && txt.trim()) out = (dir==='prev'? txt.trim()+' '+out
+                                  : out+' '+txt.trim());
+      cur = cur[dir]();
     }
-    return out;
+    return out.slice(0,limit);
   };
-  return [...grab('prev').slice(-N),...grab('next').slice(0,N)]
-         .join(' ').toLowerCase();
+  return (
+    collect('prev',NEAR_CHARS) + ' ' + collect('next',NEAR_CHARS)
+  ).toLowerCase();
 };
 
 const bucket=(raw,url)=>{
@@ -68,11 +73,11 @@ const filter=list=>{
   });
 };
 
-/* ────────── HTML quick pass (unchanged) ────────── */
+/* ────────── HTML quick pass ────────── */
 const UA_PC='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '+
             '(KHTML, like Gecko) Chrome/123 Safari/537.36';
 
-async function scrapeHTML(url,N){
+async function scrapeHTML(url){
   let resp;
   try{
     resp=await fetch(url,{
@@ -119,15 +124,16 @@ async function scrapeHTML(url,N){
   const strip=s=>s.toLowerCase().replace(/[^a-z0-9 ]+/g,'').trim();
   clean.forEach(i=>{
     if(i.alt){
-      const around=wordsAround($,i.$el,N);
+      const around=charsAround($,i.$el);
+      i.matchingSnippet=around.slice(0,120);     // store a short preview
       i.dup=strip(around).includes(strip(i.alt));
     }
   });
   return{report:bucket(clean,url),metrics:{raw:raw.length,kept:clean.length}};
 }
 
-/* ────────── JS-DOM pass (unchanged) ────────── */
-async function scrapeDOM(url,N){
+/* ────────── JS-DOM pass ────────── */
+async function scrapeDOM(url){
   const exe=await chromium.executablePath();
   async function run({jsOn,timeout,ua}){
     const browser=await puppeteer.launch({
@@ -158,14 +164,29 @@ async function scrapeDOM(url,N){
 
       const raw=await page.$$eval(
         ['img','source','[style*="background-image"]'].join(','),
-        (els,N)=>{
+        (els,NEAR_CHARS)=>{
           const norm=s=>s.replace(/\{width\}x\{height\}/gi,'600x');
           const tok =s=>s.trim().split(/\s+/)[0];
           const strip=s=>s.toLowerCase().replace(/[^a-z0-9 ]+/g,'').trim();
+          const collect=(node,dir,limit)=>{
+            let n=node[dir], out='';
+            while(n && out.length<limit){
+              if(n.nodeType===3 && n.textContent.trim())
+                out = dir==='previousSibling'? n.textContent.trim()+' '+out
+                                             : out+' '+n.textContent.trim();
+              else if(n.nodeType===1){
+                const t=n.textContent.trim();
+                if(t) out = dir==='previousSibling'? t+' '+out : out+' '+t;
+              }
+              n=n[dir];
+            }
+            return out.slice(0,limit);
+          };
+
           return els.map(el=>{
             const tag=el.tagName.toLowerCase();
             const g=a=>el.getAttribute(a)||'';
-            let src='',alt='',too=false,dup=false;
+            let src='',alt='',too=false,dup=false,snippet='';
 
             if(tag==='img'){
               src=g('data-srcset')||g('srcset')||g('data-src')||g('data-lazy')||
@@ -183,25 +204,15 @@ async function scrapeDOM(url,N){
             }
 
             if(alt){
-              const grab=(node,dir,out=[])=>{
-                let n=node[dir];
-                while(n&&out.length<N){
-                  if(n.nodeType===3&&n.textContent.trim())
-                    out.push(...n.textContent.trim().split(/\s+/));
-                  else if(n.nodeType===1){
-                    const t=n.textContent.trim(); if(t) out.push(...t.split(/\s+/));
-                  }
-                  n=n[dir];
-                }
-                return out;
-              };
-              const around=[...grab(el,'previousSibling').slice(-N),
-                            ...grab(el,'nextSibling').slice(0,N)].join(' ');
-              dup=strip(around).includes(strip(alt));
+              const around = collect(el,'previousSibling',NEAR_CHARS)+' '+
+                             collect(el,'nextSibling',NEAR_CHARS);
+              snippet = around.slice(0,120);
+              dup = strip(around).includes(strip(alt));
             }
-            return{src:norm(tok(src)),alt:alt.trim(),tooSmall:too,dup};
+            return{src:norm(tok(src)),alt:alt.trim(),tooSmall:too,dup,
+                   matchingSnippet:snippet};
           });
-        },N
+        },NEAR_CHARS
       );
       await browser.close();
       return bucket(filter(raw),url);
@@ -209,7 +220,6 @@ async function scrapeDOM(url,N){
   }
 
   try{
-    /* mobile UA first (often unblocked) */
     const UA_MB='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '+
                 'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 '+
                 'Mobile/15E148 Safari/604.1';
@@ -220,7 +230,7 @@ async function scrapeDOM(url,N){
   }
 }
 
-/* ────────── handler ────────── */
+/* ────────── handler (unchanged except for html/DOM call signatures) ────────── */
 module.exports=async(req,res)=>{
   const ok=[
     'https://scribely-v2.webflow.io','https://scribely.com','https://www.scribely.com',
@@ -237,21 +247,19 @@ module.exports=async(req,res)=>{
   if(!url) return res.status(400).json({error:'Missing url'});
   if(!/^[a-z]+:\/\//i.test(url)) url='https://'+url;
 
-  const WORDS=50, MIN_IMG=20;
+  const MIN_IMG=20;
 
   try{
     let htmlReport, metrics;
     try{
-      const r = await scrapeHTML(url,WORDS);
+      const r = await scrapeHTML(url);
       htmlReport=r.report; metrics=r.metrics;
     }catch(htmlErr){
-      if(htmlErr.message!=="blocked") throw htmlErr;  /* typo / internal */
-      /* blocked → try JS-DOM before giving up */
-      const dom=await scrapeDOM(url,WORDS);
-      /* ====== CHANGE 1 ====== */
-      if(dom.totalImages>0)              // accept any non-empty result
+      if(htmlErr.message!=="blocked") throw htmlErr;
+      const dom=await scrapeDOM(url);
+      if(dom.totalImages>0)
         return res.status(200).json({...dom,engine:'js-dom'});
-      throw htmlErr;                     /* still blocked */
+      throw htmlErr;
     }
 
     const placeholder = 1 - (metrics.kept/(metrics.raw||1));
@@ -259,9 +267,8 @@ module.exports=async(req,res)=>{
 
     if(!needDom) return res.status(200).json({...htmlReport,engine:'html'});
 
-    const dom=await scrapeDOM(url,WORDS);
-    /* ====== CHANGE 2 ====== */
-    if(dom.totalImages===0) throw new Error('blocked'); // only 0 ⇒ blocked
+    const dom=await scrapeDOM(url);
+    if(dom.totalImages===0) throw new Error('blocked');
     return res.status(200).json({...dom,engine:'js-dom'});
 
   }catch(err){
