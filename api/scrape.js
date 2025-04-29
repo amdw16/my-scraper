@@ -1,10 +1,10 @@
 /*************************************************************************
- * Scribely Alt-Text Checker – v13
+ * Scribely Alt-Text Checker – v14
  * ------------------------------------------------------------
+ *  • chooseSrc() fixed → keeps entire URL even when path contains commas
+ *    (Nike CDN URLs were truncated to “…/f_auto” before)
  *  • Deep-scan flag removed (duplicate-text check always on)
- *  • Supports Nike’s data-landscape-url / data-portrait-url
- *  • Fixed “scheme://” regex that crashed on deploy
- *  • Distinct 400 (typos/format) vs 403 (security block) status codes
+ *  • 400 vs 403 status codes preserved for typo / security-block
  *************************************************************************/
 
 const chromium  = require('@sparticuz/chromium');
@@ -14,16 +14,21 @@ const fetch     = require('node-fetch');
 
 /*───────────────── helper utilities ─────────────────*/
 const chooseSrc = g => {
+  /* Read common lazy-load attributes; return the first **token**
+     before whitespace.  We no longer split on “,” so commas inside
+     the path (e.g.  “…/f_auto,dpr_1.5,cs_srgb/…”) are preserved.  */
   const raw = g('data-srcset')       || g('srcset') ||
               g('data-src')          || g('data-lazy') ||
               g('data-original')     || g('data-landscape-url') ||
               g('data-portrait-url') || g('src') || '';
-  return raw.split(',')[0].trim().split(' ')[0];
+  return raw.trim().split(/\s+/)[0];      // ← only whitespace split
 };
+
 const bgUrl = s => (s || '').match(/url\(["']?(.*?)["']?\)/i)?.[1] || '';
 const norm  = s => s.replace(/\{width\}x\{height\}/gi, '600x');
 const tiny  = u => /^data:image\/gif;base64,/i.test(u) && u.length < 200;
 
+/* ±N words before+after a node */
 function wordsAround($, $el, N) {
   const grab = dir => {
     const out = []; let cur = $el[dir]();
@@ -37,16 +42,16 @@ function wordsAround($, $el, N) {
     return out;
   };
   return [...grab('prev').slice(-N), ...grab('next').slice(0, N)]
-         .join(' ').toLowerCase();
+           .join(' ').toLowerCase();
 }
 
-/*────────────── bucketing results ──────────────*/
+/*---------- bucket into result groups ----------*/
 function bucket(raw, url) {
   const grp = {
-    'Missing Alt Text': [],
-    'File Name'       : [],
-    'Matching Nearby Content': [],
-    'Manual Check'    : []
+    'Missing Alt Text'        : [],
+    'File Name'               : [],
+    'Matching Nearby Content' : [],
+    'Manual Check'            : []
   };
   const extRE = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
 
@@ -69,7 +74,7 @@ function bucket(raw, url) {
   return { totalImages: raw.length, errorGroups: grp };
 }
 
-/*────────────── basic quality filter ──────────────*/
+/*----------- basic quality filter -----------*/
 function filter(list) {
   const freq = Object.create(null);
   list.forEach(i => { if (i.src) freq[i.src] = (freq[i.src] || 0) + 1; });
@@ -85,35 +90,33 @@ function filter(list) {
 
 /*──────────────────── HTML quick pass ───────────────────*/
 async function scrapeHTML(url, N) {
-  let res;
-  try {
-    res = await fetch(url, { timeout: 6000 });
-  } catch {
-    throw new Error('blocked');                  // DNS / Net / timeout
-  }
-  if (!res.ok) throw new Error('typo');          // 4xx | 5xx
+  let resp;
+  try { resp = await fetch(url, { timeout: 6000 }); }
+  catch { throw new Error('blocked'); }
 
-  const $ = cheerio.load(await res.text());
+  if (!resp.ok) throw new Error('typo');
+
+  const $   = cheerio.load(await resp.text());
   const raw = [];
 
   $('img,source,[style*="background-image"]').each((_, el) => {
     const $e  = $(el);
     const tag = el.tagName.toLowerCase();
 
-    let src = '', alt = '', tooSmall = false;
+    let src = '', alt = '', too = false;
     if (tag === 'img') {
-      src = chooseSrc(attr => $e.attr(attr));
+      src = chooseSrc(a => $e.attr(a));
       alt = $e.attr('alt') || '';
-      const w = +$e.attr('width') || 0;
-      const h = +$e.attr('height')|| 0;
-      tooSmall = w && h && (w * h <= 9);
+      const w = +$e.attr('width')  || 0;
+      const h = +$e.attr('height') || 0;
+      too = w && h && (w * h <= 9);
     } else if (tag === 'source') {
-      src = chooseSrc(attr => $e.attr(attr));
+      src = chooseSrc(a => $e.attr(a));
       alt = $e.parent('picture').find('img').attr('alt') || '';
     } else {
       src = bgUrl($e.attr('style'));
     }
-    raw.push({ src: norm(src), alt: alt.trim(), tooSmall, $el: $e });
+    raw.push({ src: norm(src), alt: alt.trim(), tooSmall: too, $el: $e });
   });
 
   const clean = filter(raw);
@@ -128,7 +131,7 @@ async function scrapeHTML(url, N) {
   };
 }
 
-/*───────────────── JS-DOM pass (lazy-load / SPA) ───────────────*/
+/*──────────────── JS-DOM pass (lazy load / SPA) ────────────────*/
 async function scrapeDOM(url, N) {
   const exe = await chromium.executablePath();
 
@@ -150,7 +153,6 @@ async function scrapeDOM(url, N) {
 
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
 
-      /* lazy-load scroll */
       if (jsOn) {
         let prev = 0;
         for (let i = 0; i < 12; i++) {
@@ -166,7 +168,9 @@ async function scrapeDOM(url, N) {
       const raw = await page.$$eval(
         ['img','source','[style*="background-image"]'].join(','),
         (els, N) => {
+          const tiny = u => /^data:image\/gif;base64,/i.test(u) && u.length < 200;
           const norm = s => s.replace(/\{width\}x\{height\}/gi, '600x');
+
           return els.map(el => {
             const tag = el.tagName.toLowerCase();
             const g   = a => el.getAttribute(a) || '';
@@ -187,7 +191,7 @@ async function scrapeDOM(url, N) {
               src = m ? m[1] : '';
             }
 
-            /* duplicate-text detection */
+            /* duplicate-text check */
             if (alt) {
               const grab = dir => {
                 const out = []; let n = el[dir];
@@ -207,13 +211,16 @@ async function scrapeDOM(url, N) {
               dup = around.includes(alt.toLowerCase());
             }
 
-            return { src: norm(src), alt: alt.trim(), tooSmall: too, dup };
-          });
+            return { src: norm(src.split(/\s+/)[0]),    // only first token
+                     alt: alt.trim(),
+                     tooSmall: too,
+                     dup };
+          }).filter(i => i.src && !tiny(i.src));
         }, N
       );
 
       await browser.close();
-      return bucket(filter(raw), url);
+      return bucket(raw, url);
 
     } catch (e) {
       await browser.close();
@@ -228,7 +235,7 @@ async function scrapeDOM(url, N) {
   try {
     return await run({ jsOn: true,  timeout: 7000,  ua: UA_PC });
   } catch (e) {
-    if (!/Timeout/i.test(e.message)) throw e;          // genuine error
+    if (!/Timeout/i.test(e.message)) throw e;
     return await run({ jsOn: false, timeout: 10000, ua: UA_MB });
   }
 }
@@ -250,21 +257,17 @@ module.exports = async (req, res) => {
 
   let { url } = req.body || {};
   if (!url) return res.status(400).json({ error: 'Missing url' });
-  if (!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;    // ✅ fixed
+  if (!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;   // fixed regex
 
   const WORD_WINDOW = 50;
 
   try {
-    /* pass ①: server-rendered HTML */
     const { report: first, metrics } = await scrapeHTML(url, WORD_WINDOW);
     const placeholderRatio = 1 - (metrics.kept / (metrics.raw || 1));
     const needDom = placeholderRatio >= 0.8 || first.totalImages < 20;
 
-    if (!needDom) {
-      return res.status(200).json({ ...first, engine: 'html' });
-    }
+    if (!needDom) return res.status(200).json({ ...first, engine: 'html' });
 
-    /* pass ②: JS-rendered / lazy-loaded images */
     const dom = await scrapeDOM(url, WORD_WINDOW);
     if (dom.totalImages < 20) {
       return res.status(200).json({
