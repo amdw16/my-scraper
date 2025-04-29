@@ -1,19 +1,17 @@
 /*************************************************************************
- * Scribely Alt-Text Checker – v20  (2025-04-29)
- *  · Fix: treat a page as “blocked” only when **zero** images are found,
- *    so low-image sub-pages no longer trigger the security-measure alert.
+ * Scribely Alt-Text Checker – v19-patch  (2025-04-29)
+ *  · “Blocked” now means *zero* images instead of “< 20” images
  *************************************************************************/
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio   = require('cheerio');
 const fetch     = require('node-fetch');
 
-/* ───────── helpers ───────── */
+/* ────────── helpers (unchanged) ────────── */
 const chooseSrc = g => (
   (g('data-srcset')||g('srcset')||g('data-src')||g('data-lazy')||
    g('data-original')||g('data-landscape-url')||g('data-portrait-url')||
-   g('src')||'').trim().split(/\s+/)[0]
-);
+   g('src')||'').trim().split(/\s+/)[0]);
 const bgUrl = s => (s||'').match(/url\(["']?(.*?)["']?\)/i)?.[1] || '';
 const norm  = s => s.replace(/\{width\}x\{height\}/gi,'600x');
 const tiny  = u => /^data:image\/gif;base64,/i.test(u) && u.length < 200;
@@ -70,7 +68,7 @@ const filter=list=>{
   });
 };
 
-/* ───────── HTML quick pass ───────── */
+/* ────────── HTML quick pass (unchanged) ────────── */
 const UA_PC='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '+
             '(KHTML, like Gecko) Chrome/123 Safari/537.36';
 
@@ -128,7 +126,7 @@ async function scrapeHTML(url,N){
   return{report:bucket(clean,url),metrics:{raw:raw.length,kept:clean.length}};
 }
 
-/* ───────── JS-DOM pass ───────── */
+/* ────────── JS-DOM pass (unchanged) ────────── */
 async function scrapeDOM(url,N){
   const exe=await chromium.executablePath();
   async function run({jsOn,timeout,ua}){
@@ -149,9 +147,7 @@ async function scrapeDOM(url,N){
       if(jsOn){
         let prev=0;
         for(let i=0;i<12;i++){
-          const len=await page.$$eval(
-            'img,source,[style*="background-image"]',els=>els.length
-          );
+          const len=await page.$$eval('img,source,[style*="background-image"]',els=>els.length);
           if(len-prev<5) break;
           prev=len;
           await page.evaluate(()=>window.scrollBy(0,window.innerHeight*0.9));
@@ -173,8 +169,8 @@ async function scrapeDOM(url,N){
 
             if(tag==='img'){
               src=g('data-srcset')||g('srcset')||g('data-src')||g('data-lazy')||
-                  g('data-original')||g('data-landscape-url')||
-                  g('data-portrait-url')||g('src')||'';
+                  g('data-original')||g('data-landscape-url')||g('data-portrait-url')||
+                  g('src')||'';
               alt=g('alt');
               too=el.width&&el.height&&(el.width*el.height<=9);
             }else if(tag==='source'){
@@ -224,7 +220,7 @@ async function scrapeDOM(url,N){
   }
 }
 
-/* ───────── request handler ───────── */
+/* ────────── handler ────────── */
 module.exports=async(req,res)=>{
   const ok=[
     'https://scribely-v2.webflow.io','https://scribely.com','https://www.scribely.com',
@@ -244,33 +240,28 @@ module.exports=async(req,res)=>{
   const WORDS=50, MIN_IMG=20;
 
   try{
-    /* ---------- quick HTML probe ---------- */
     let htmlReport, metrics;
     try{
-      const r=await scrapeHTML(url,WORDS);
+      const r = await scrapeHTML(url,WORDS);
       htmlReport=r.report; metrics=r.metrics;
     }catch(htmlErr){
-      if(htmlErr.message!=='blocked') throw htmlErr;   /* typo / internal */
-      /* HTML blocked → try JS-DOM before giving up */
+      if(htmlErr.message!=="blocked") throw htmlErr;  /* typo / internal */
+      /* blocked → try JS-DOM before giving up */
       const dom=await scrapeDOM(url,WORDS);
-      if(dom.totalImages>0)              /* ← accept any non-zero result */
+      /* ====== CHANGE 1 ====== */
+      if(dom.totalImages>0)              // accept any non-empty result
         return res.status(200).json({...dom,engine:'js-dom'});
       throw htmlErr;                     /* still blocked */
     }
 
-    /* decide if we need a DOM pass at all */
     const placeholder = 1 - (metrics.kept/(metrics.raw||1));
     const needDom = placeholder>=0.8 || htmlReport.totalImages<MIN_IMG;
 
-    if(!needDom)
-      return res.status(200).json({...htmlReport,engine:'html'});
+    if(!needDom) return res.status(200).json({...htmlReport,engine:'html'});
 
-    /* ---------- detailed DOM probe ---------- */
     const dom=await scrapeDOM(url,WORDS);
-
-    /* NEW RULE: treat as blocked only when **zero** images returned */
-    if(dom.totalImages===0) throw new Error('blocked');
-
+    /* ====== CHANGE 2 ====== */
+    if(dom.totalImages===0) throw new Error('blocked'); // only 0 ⇒ blocked
     return res.status(200).json({...dom,engine:'js-dom'});
 
   }catch(err){
