@@ -1,285 +1,317 @@
 /*************************************************************************
- * Scribely Alt-Text Checker – v19-patch-C  (2025-04-29)
- *  · 300-char matching window
- *  · Don’t block image requests when JS is enabled  ➜ fixes Airbnb, etc.
+ * Scribely Alt-Text Checker – v19-patch-D  (2025-04-29)
+ *  · 300-character “matching-nearby-content” window
+ *  · 0-image ⇒ “blocked” (no more < 20 rule)
+ *  · Two-step JS-DOM: fast JS-off pass, then JS-on if < 20 images
  *************************************************************************/
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio   = require('cheerio');
 const fetch     = require('node-fetch');
 
-/* ────────── helpers ────────── */
+/* ───────────── helper utilities ───────────── */
 const chooseSrc = g => (
   (g('data-srcset')||g('srcset')||g('data-src')||g('data-lazy')||
    g('data-original')||g('data-landscape-url')||g('data-portrait-url')||
    g('src')||'').trim().split(/\s+/)[0]);
+
 const bgUrl = s => (s||'').match(/url\(["']?(.*?)["']?\)/i)?.[1] || '';
 const norm  = s => s.replace(/\{width\}x\{height\}/gi,'600x');
 const tiny  = u => /^data:image\/gif;base64,/i.test(u) && u.length < 200;
 
-/* --- 300-character window around each image --- */
+/* ---------- “matching nearby” helpers ---------- */
 const NEAR_CHARS = 300;
-const charsAround = ($,$el)=>{
-  const grab = (dir,limit)=>{
-    let cur=$el[dir](), out='';
-    while(cur.length && out.length<limit){
-      const txt = cur[0].type==='text' ? cur[0].data :
-                 (cur[0].type==='tag'  ? cur.text()  : '');
-      if(txt && txt.trim()){
-        out = dir==='prev' ? (txt.trim()+' '+out) : (out+' '+txt.trim());
+const charsAround = ($,$el) => {
+  const grab = (dir, lim, out = '') => {
+    let cur = $el[dir]();
+    while (cur.length && out.length < lim) {
+      const txt = cur[0].type === 'text'
+                  ? cur[0].data
+                  : (cur[0].type === 'tag' ? cur.text() : '');
+      if (txt && txt.trim()) {
+        out = dir === 'prev' ? txt.trim() + ' ' + out : out + ' ' + txt.trim();
       }
       cur = cur[dir]();
     }
-    return out.slice(0,limit);
+    return out.slice(0, lim);
   };
-  return (grab('prev',NEAR_CHARS)+' '+grab('next',NEAR_CHARS)).toLowerCase();
+  return (grab('prev', NEAR_CHARS) + ' ' + grab('next', NEAR_CHARS)).toLowerCase();
 };
 
-const bucket = (raw,url)=>{
+/* ---------- error bucketing ---------- */
+const bucket = (raw, url) => {
   const g = {
-    'Missing Alt Text':[],
-    'File Name':[],
-    'Matching Nearby Content':[],
-    'Manual Check':[]
+    'Missing Alt Text'        : [],
+    'File Name'               : [],
+    'Matching Nearby Content' : [],
+    'Manual Check'            : []
   };
-  const ext=/\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
-  raw.forEach(i=>{
-    if(!i.src) return;
-    try{i.src=new URL(i.src,url).toString();}catch{}
-    const low=i.alt.toLowerCase();
-    const base=(i.src.split('/').pop()||'').split('.')[0];
-    const rec={src:i.src,alt:i.alt};
-    if(i.matchingSnippet) rec.matchingSnippet=i.matchingSnippet;
+  const ext = /\.(png|jpe?g|webp|gif|bmp|tiff?)$/i;
 
-    if(!i.alt)                      g['Missing Alt Text'].push(rec);
-    else if(i.dup)                  g['Matching Nearby Content'].push(rec);
-    else if(low===base || ext.test(low))
-                                   g['File Name'].push(rec);
-    else                            g['Manual Check'].push(rec);
+  raw.forEach(i => {
+    if (!i.src) return;
+    try { i.src = new URL(i.src, url).toString(); } catch {}
+    const low  = i.alt.toLowerCase();
+    const base = (i.src.split('/').pop() || '').split('.')[0];
+    const rec  = { src: i.src, alt: i.alt };
+    if (i.matchingSnippet) rec.matchingSnippet = i.matchingSnippet;
+
+    if (!i.alt)                       g['Missing Alt Text'].push(rec);
+    else if (i.dup)                   g['Matching Nearby Content'].push(rec);
+    else if (low === base || ext.test(low))
+                                      g['File Name'].push(rec);
+    else                               g['Manual Check'].push(rec);
   });
-  return { totalImages:raw.length,errorGroups:g };
+  return { totalImages: raw.length, errorGroups: g };
 };
 
-const filter = list=>{
-  const freq=Object.create(null);
-  list.forEach(i=>{ if(i.src) freq[i.src]=(freq[i.src]||0)+1; });
-  return list.filter(i=>{
-    if(!i.src||i.tooSmall||tiny(i.src)) return false;
-    const d=freq[i.src]||0, gif=/\.gif/i.test(i.src), svg=/\.svg/i.test(i.src);
-    if(d>=10&&(!i.alt||gif)) return false;
-    if(d>=5 &&!i.alt&&svg)   return false;
+/* ---------- image list cleanup ---------- */
+const filter = list => {
+  const freq = Object.create(null);
+  list.forEach(i => { if (i.src) freq[i.src] = (freq[i.src] || 0) + 1; });
+
+  return list.filter(i => {
+    if (!i.src || i.tooSmall || tiny(i.src)) return false;
+    const d   = freq[i.src] || 0,
+          gif = /\.gif/i.test(i.src),
+          svg = /\.svg/i.test(i.src);
+    if (d >= 10 && (!i.alt || gif)) return false;
+    if (d >= 5  && !i.alt && svg)   return false;
     return true;
   });
 };
 
-/* ────────── HTML quick pass (unchanged) ────────── */
-const UA_PC='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '+
-            '(KHTML, like Gecko) Chrome/123 Safari/537.36';
+/* ───────────── HTML quick probe (no JS) ───────────── */
+const UA_PC = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+              'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36';
 
-async function scrapeHTML(url){
+async function scrapeHTML(url) {
   let resp;
-  try{
-    resp = await fetch(url,{
-      timeout:12000,
-      headers:{'User-Agent':UA_PC,'Accept-Language':'en-US,en;q=0.9'}
+  try {
+    resp = await fetch(url, {
+      timeout: 12000,
+      headers: { 'User-Agent': UA_PC, 'Accept-Language': 'en-US,en;q=0.9' }
     });
-  }catch{ throw new Error('blocked'); }
+  } catch { throw new Error('blocked'); }
 
-  if(resp.status>=400 && resp.status<500){
-    const body=await resp.text().catch(()=>''), blocked =
-      resp.status===401||resp.status===403||resp.status===429||
-      /access\s+denied|captcha|cloudflare|akamai/i.test(body);
-    throw new Error(blocked?'blocked':'typo');
+  if (resp.status >= 400 && resp.status < 500) {
+    const body = await resp.text().catch(() => '');
+    const blocked = resp.status === 401 || resp.status === 403 || resp.status === 429 ||
+                    /access\s+denied|captcha|cloudflare|akamai/i.test(body);
+    throw new Error(blocked ? 'blocked' : 'typo');
   }
-  if(!resp.ok) throw new Error('internal');
+  if (!resp.ok) throw new Error('internal');
 
-  const html=await resp.text(), $=cheerio.load(html), raw=[];
-  $('img,source,[style*="background-image"]').each((_,el)=>{
-    const $e=$(el),tag=el.tagName.toLowerCase();
-    let src='',alt='',too=false;
-    if(tag==='img'){
-      src=chooseSrc(a=>$e.attr(a)); alt=$e.attr('alt')||'';
-      const w=+$e.attr('width')||0, h=+$e.attr('height')||0;
-      too = w&&h&&(w*h<=9);
-    }else if(tag==='source'){
-      src=chooseSrc(a=>$e.attr(a));
-      alt=$e.parent('picture').find('img').attr('alt')||'';
-    }else{
+  const html = await resp.text();
+  const $    = cheerio.load(html);
+  const raw  = [];
+
+  $('img,source,[style*="background-image"]').each((_, el) => {
+    const $e  = $(el);
+    const tag = el.tagName.toLowerCase();
+    let src = '', alt = '', too = false;
+
+    if (tag === 'img') {
+      src = chooseSrc(a => $e.attr(a));
+      alt = $e.attr('alt') || '';
+      const w = +$e.attr('width')  || 0,
+            h = +$e.attr('height') || 0;
+      too = w && h && (w * h <= 9);
+    } else if (tag === 'source') {
+      src = chooseSrc(a => $e.attr(a));
+      alt = $e.parent('picture').find('img').attr('alt') || '';
+    } else {
       src = bgUrl($e.attr('style'));
     }
-    raw.push({src:norm(src),alt:alt.trim(),tooSmall:too,$el:$e});
+    raw.push({ src: norm(src), alt: alt.trim(), tooSmall: too, $el: $e });
   });
 
-  const clean=filter(raw), strip=s=>s.toLowerCase().replace(/[^a-z0-9 ]+/g,'').trim();
-  clean.forEach(i=>{
-    if(i.alt){
-      const around = charsAround($,i.$el);
-      i.matchingSnippet = around.slice(0,120);
+  const clean = filter(raw);
+  const strip = s => s.toLowerCase().replace(/[^a-z0-9 ]+/g, '').trim();
+
+  clean.forEach(i => {
+    if (i.alt) {
+      const around = charsAround($, i.$el);
+      i.matchingSnippet = around.slice(0, 120);
       i.dup = strip(around).includes(strip(i.alt));
     }
   });
-  return { report:bucket(clean,url), metrics:{raw:raw.length,kept:clean.length} };
+
+  return { report: bucket(clean, url), metrics: { raw: raw.length, kept: clean.length } };
 }
 
-/* ────────── JS-DOM pass ────────── */
-async function scrapeDOM(url){
-  const exe = await chromium.executablePath();
+/* ───────────── JS-DOM scraper (two-step) ───────────── */
+async function scrapeDOM(url) {
+  const exe      = await chromium.executablePath();
+  const MIN_GOOD = 20;
 
-  async function run({jsOn,timeout,ua}){
+  async function run({ jsOn, timeout, ua }) {
     const browser = await puppeteer.launch({
-      executablePath:exe,
-      headless:chromium.headless,
-      args:[...chromium.args,'--no-sandbox','--disable-setuid-sandbox']
+      executablePath: exe,
+      headless      : chromium.headless,
+      args          : [...chromium.args, '--no-sandbox', '--disable-setuid-sandbox']
     });
-    try{
+
+    try {
       const page = await browser.newPage();
       await page.setJavaScriptEnabled(jsOn);
       await page.setUserAgent(ua);
 
-      /* --- NEW: only block images when JS is *disabled* --- */
+      /* block heavy assets; allow <img> only when JS is on */
       await page.setRequestInterception(true);
-      page.on('request', r=>{
-        const type = r.resourceType();
-        const always = new Set(['stylesheet','font','media']);
-        const blockImg = !jsOn;        // allow images when JS is on
-        if(always.has(type) || (blockImg && type==='image')) r.abort();
+      page.on('request', r => {
+        const t = r.resourceType();
+        const always = new Set(['stylesheet', 'font', 'media']);
+        const blockImg = !jsOn;
+        if (always.has(t) || (blockImg && t === 'image')) r.abort();
         else r.continue();
       });
 
-      await page.goto(url,{waitUntil:'domcontentloaded',timeout});
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout });
 
-      /* lazy-load loop */
-      if(jsOn){
-        let prev=0;
-        for(let i=0;i<12;i++){
-          const len = await page.$$eval(
-            'img,source,[style*="background-image"]', els=>els.length);
-          if(len-prev<5) break;
+      /* lazy-load scroll */
+      if (jsOn) {
+        let prev = 0;
+        for (let i = 0; i < 12; i++) {
+          const len = await page.$$eval('img,source,[style*="background-image"]', els => els.length);
+          if (len - prev < 5) break;
           prev = len;
-          await page.evaluate(()=>window.scrollBy(0,window.innerHeight*0.9));
+          await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.9));
           await page.waitForTimeout(700);
         }
-        await page.waitForTimeout(1000);  // extra settle time
+        await page.waitForTimeout(1000);
       }
 
       const raw = await page.$$eval(
-        ['img','source','[style*="background-image"]'].join(','),
-        (els,NEAR_CHARS)=>{
-          const norm=s=>s.replace(/\{width\}x\{height\}/gi,'600x');
-          const tok =s=>s.trim().split(/\s+/)[0];
-          const strip=s=>s.toLowerCase().replace(/[^a-z0-9 ]+/g,'').trim();
+        ['img', 'source', '[style*="background-image"]'].join(','),
+        (els, LIM) => {
+          const norm  = s => s.replace(/\{width\}x\{height\}/gi, '600x');
+          const tok   = s => s.trim().split(/\s+/)[0];
+          const strip = s => s.toLowerCase().replace(/[^a-z0-9 ]+/g, '').trim();
 
-          const grab=(node,dir,limit)=>{
-            let n=node[dir], out='';
-            while(n && out.length<limit){
-              if(n.nodeType===3 && n.textContent.trim())
-                out = dir==='previousSibling'
-                     ? n.textContent.trim()+' '+out
-                     : out+' '+n.textContent.trim();
-              else if(n.nodeType===1){
-                const t=n.textContent.trim();
-                if(t) out = dir==='previousSibling' ? t+' '+out : out+' '+t;
+          const grab = (n, dir, lim, out = '') => {
+            let cur = n[dir];
+            while (cur && out.length < lim) {
+              if (cur.nodeType === 3 && cur.textContent.trim()) {
+                out = dir === 'previousSibling'
+                      ? cur.textContent.trim() + ' ' + out
+                      : out + ' ' + cur.textContent.trim();
+              } else if (cur.nodeType === 1) {
+                const t = cur.textContent.trim();
+                if (t) out = dir === 'previousSibling' ? t + ' ' + out : out + ' ' + t;
               }
-              n=n[dir];
+              cur = cur[dir];
             }
-            return out.slice(0,limit);
+            return out.slice(0, lim);
           };
 
-          return els.map(el=>{
-            const tag=el.tagName.toLowerCase(), g=a=>el.getAttribute(a)||'';
-            let src='',alt='',too=false,dup=false,snippet='';
+          return els.map(el => {
+            const tag = el.tagName.toLowerCase();
+            const g   = a => el.getAttribute(a) || '';
+            let src = '', alt = '', too = false, dup = false, snip = '';
 
-            if(tag==='img'){
-              src=g('data-srcset')||g('srcset')||g('data-src')||g('data-lazy')||
-                  g('data-original')||g('data-landscape-url')||g('data-portrait-url')||
-                  g('src')||'';
-              alt=g('alt');
-              too = el.width&&el.height && (el.width*el.height<=9);
-            }else if(tag==='source'){
-              src=g('data-srcset')||g('srcset')||g('data-landscape-url')||
-                  g('data-portrait-url')||'';
+            if (tag === 'img') {
+              src = g('data-srcset') || g('srcset') || g('data-src') || g('data-lazy') ||
+                    g('data-original') || g('data-landscape-url') || g('data-portrait-url') ||
+                    g('src') || '';
+              alt = g('alt');
+              too = el.width && el.height && (el.width * el.height <= 9);
+            } else if (tag === 'source') {
+              src = g('data-srcset') || g('srcset') || g('data-landscape-url') ||
+                    g('data-portrait-url') || '';
               alt = el.parentElement.querySelector('img')?.alt || '';
-            }else{
-              const m=/url\(["']?(.*?)["']?\)/.exec(el.style.backgroundImage||'');
-              src = m?m[1]:'';
+            } else {
+              const m = /url\(["']?(.*?)["']?\)/.exec(el.style.backgroundImage || '');
+              src = m ? m[1] : '';
             }
 
-            if(alt){
-              const around = grab(el,'previousSibling',NEAR_CHARS)+' '+
-                             grab(el,'nextSibling',   NEAR_CHARS);
-              snippet = around.slice(0,120);
-              dup = strip(around).includes(strip(alt));
+            if (alt) {
+              const around = grab(el, 'previousSibling', LIM) + ' ' +
+                             grab(el, 'nextSibling', LIM);
+              snip = around.slice(0, 120);
+              dup  = strip(around).includes(strip(alt));
             }
-            return {src:norm(tok(src)),alt:alt.trim(),tooSmall:too,
-                    dup,matchingSnippet:snippet};
+            return { src: norm(tok(src)), alt: alt.trim(), tooSmall: too, dup, matchingSnippet: snip };
           });
-        },NEAR_CHARS
+        }, NEAR_CHARS
       );
 
       await browser.close();
-      return bucket(filter(raw),url);
-    }catch(e){ await browser.close(); throw e; }
+      return bucket(filter(raw), url);
+    } catch (e) {
+      await browser.close();
+      throw e;
+    }
   }
 
-  try{
-    /* mobile UA first */
-    const UA_MB='Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '+
-                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 '+
+  /* 1️⃣  fast pass: mobile UA, JS disabled */
+  const UA_MB = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) ' +
+                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 ' +
                 'Mobile/15E148 Safari/604.1';
-    return await run({jsOn:false,timeout:20000,ua:UA_MB});
-  }catch(e){
-    if(!/Timeout/i.test(e.message)) throw e;
-    return await run({jsOn:true,timeout:20000,ua:UA_PC});
-  }
+
+  const fast = await run({ jsOn: false, timeout: 20000, ua: UA_MB });
+  if (fast.totalImages >= MIN_GOOD) return fast;
+
+  /* 2️⃣  heavy pass: desktop UA, JS enabled */
+  return await run({ jsOn: true, timeout: 20000, ua: UA_PC });
 }
 
-/* ────────── handler (unchanged) ────────── */
-module.exports = async (req,res)=>{
-  const ok=[
-    'https://scribely-v2.webflow.io','https://scribely.com','https://www.scribely.com',
-    'https://scribelytribe.com','https://www.scribelytribe.com'
+/* ───────────── HTTP handler ───────────── */
+module.exports = async (req, res) => {
+  /* CORS */
+  const ok = [
+    'https://scribely-v2.webflow.io',
+    'https://scribely.com',  'https://www.scribely.com',
+    'https://scribelytribe.com', 'https://www.scribelytribe.com'
   ];
-  const origin=req.headers.origin||'*';
-  res.setHeader('Access-Control-Allow-Origin',ok.includes(origin)?origin:'*');
-  res.setHeader('Access-Control-Allow-Methods','GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers','Content-Type');
-  if(req.method==='OPTIONS') return res.status(200).end();
-  if(req.method!=='POST')    return res.status(405).json({error:'POST only'});
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', ok.includes(origin) ? origin : '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'POST only' });
 
-  let {url}=req.body||{};
-  if(!url) return res.status(400).json({error:'Missing url'});
-  if(!/^[a-z]+:\/\//i.test(url)) url='https://'+url;
+  let { url } = req.body || {};
+  if (!url) return res.status(400).json({ error: 'Missing url' });
+  if (!/^[a-z]+:\/\//i.test(url)) url = 'https://' + url;
 
-  const MIN_IMG = 20;
+  const MIN_IMG = 20;   // still used for placeholder-detection logic
 
-  try{
+  try {
+    /* ---------- HTML probe ---------- */
     let htmlReport, metrics;
-    try{
-      const {report,metrics:m} = await scrapeHTML(url);
-      htmlReport = report; metrics = m;
-    }catch(htmlErr){
-      if(htmlErr.message!=="blocked") throw htmlErr;
+    try {
+      const r = await scrapeHTML(url);
+      htmlReport = r.report;
+      metrics    = r.metrics;
+    } catch (htmlErr) {
+      if (htmlErr.message !== 'blocked') throw htmlErr;       // typo / internal
+      /* blocked ⇒ try JS-DOM */
       const dom = await scrapeDOM(url);
-      if(dom.totalImages>0) return res.status(200).json({...dom,engine:'js-dom'});
-      throw htmlErr;
+      if (dom.totalImages > 0)
+        return res.status(200).json({ ...dom, engine: 'js-dom' });
+      throw htmlErr;                                          // still blocked
     }
 
-    const placeholder = 1 - (metrics.kept/(metrics.raw||1));
-    const needDom = placeholder>=0.8 || htmlReport.totalImages<MIN_IMG;
+    /* decide whether we need JS-DOM */
+    const placeholder = 1 - (metrics.kept / (metrics.raw || 1));
+    const needDom     = placeholder >= 0.8 || htmlReport.totalImages < MIN_IMG;
 
-    if(!needDom) return res.status(200).json({...htmlReport,engine:'html'});
+    if (!needDom)
+      return res.status(200).json({ ...htmlReport, engine: 'html' });
 
+    /* ---------- JS-DOM fallback ---------- */
     const dom = await scrapeDOM(url);
-    if(dom.totalImages===0) throw new Error('blocked');
-    return res.status(200).json({...dom,engine:'js-dom'});
+    if (dom.totalImages === 0) throw new Error('blocked');
+    return res.status(200).json({ ...dom, engine: 'js-dom' });
 
-  }catch(err){
-    if(/timeout/i.test(err.message)) err.message='blocked';
+  } catch (err) {
+    if (/timeout/i.test(err.message)) err.message = 'blocked';
 
-    if(err.message==='typo')    return res.status(400).json({error:'typo'});
-    if(err.message==='blocked') return res.status(403).json({error:'blocked'});
+    if (err.message === 'typo')    return res.status(400).json({ error: 'typo' });
+    if (err.message === 'blocked') return res.status(403).json({ error: 'blocked' });
 
-    console.error('fatal:',err);
-    return res.status(500).json({error:'internal'});
+    console.error('fatal:', err);
+    return res.status(500).json({ error: 'internal' });
   }
 };
