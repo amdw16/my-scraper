@@ -1,11 +1,3 @@
-/*************************************************************************
- * Scribely Alt-Text Checker — v20 (2025-04-29)
- *
- *  • “Blocked” = 0 images (no more <20 rule)
- *  • “Matching Nearby Content” now checks the **300-character window
- *    before + after** every image/ source/ BG-image
- *  • The first Puppeteer pass no longer blocks <img> requests
- *************************************************************************/
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 const cheerio   = require('cheerio');
